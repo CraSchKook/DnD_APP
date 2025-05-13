@@ -1,3 +1,5 @@
+#удалить когда придет время
+
 from typing import List
 from fastapi import HTTPException
 from app.schemas.player import Player

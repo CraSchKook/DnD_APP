@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+from app.database import engine, Base
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import HTMLResponse
 from app.routers import players
@@ -14,7 +16,18 @@ from app.routers import inventory
 from app.routers import event_instance
 from app.routers import theme
 
-app = FastAPI()
+from app.models import player  # 👈 добавь это
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Инициализация базы данных (создание таблиц)
+    print("Создаю таблицы...")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    print("Таблицы готовы.")
+    yield
+
+app = FastAPI(lifespan=lifespan)
 
 # 👇 подключаем роутер
 app.include_router(players.router)
@@ -67,3 +80,5 @@ async def websocket_endpoint(websocket: WebSocket):
     while True:
         data = await websocket.receive_text()
         await websocket.send_text(f"Сообщение получено: {data}")
+
+# asyncio.run(init_models()) - инициализация бд, которая в database.py
