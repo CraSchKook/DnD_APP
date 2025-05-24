@@ -3,19 +3,14 @@ from typing import Optional
 
 class InventoryBase(BaseModel):
     character_id: int
-    capacity: int
-    weight_limit: float
-    current_weight: float = 0.0
+    item_id: int
+    quantity: int = 1
+    equipped: bool = False
 
 class InventoryCreate(InventoryBase):
     pass
 
-class InventoryUpdate(BaseModel):
-    capacity: Optional[int] = None
-    weight_limit: Optional[float] = None
-    current_weight: Optional[float] = None
-
-class Inventory(InventoryBase):
+class InventoryRead(InventoryBase):
     id: int
 
     class Config:

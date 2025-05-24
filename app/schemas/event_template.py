@@ -1,7 +1,21 @@
 from pydantic import BaseModel, Field
+from typing import Optional, Dict, Any
 
-class EventTemplate(BaseModel):
+class EventTemplateBase(BaseModel):
+    name: str = Field(..., description="Короткое название события")
+    description: Optional[str] = None
+    parameters: Optional[Dict[str, Any]] = None  # можно передавать любые данные
+
+class EventTemplateCreate(EventTemplateBase):
+    pass
+
+class EventTemplateUpdate(BaseModel):
+    name: Optional[str] = Field(None, description="Короткое название события")
+    description: Optional[str] = None
+    parameters: Optional[Dict[str, Any]] = None
+
+class EventTemplateRead(EventTemplateBase):
     id: int = Field(..., description="Уникальный ID шаблона события")
-    title: str = Field(..., description="Короткое название события")
-    description: str = Field(..., description="Подробное описание события")
-    severity: str = Field(..., description="Степень важности события (низкая, средняя, высокая)")
+
+    class Config:
+        from_attributes = True

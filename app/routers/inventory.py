@@ -1,52 +1,55 @@
-from fastapi import APIRouter, Depends, HTTPException
-from typing import List
-from app.dependencies.db import FakeDatabase, get_db
-from app.schemas.inventory import Inventory, InventoryCreate, InventoryUpdate
+from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+
+from app.database import get_db
 from app.models.inventory import Inventory as InventoryModel
+from app.schemas.inventory import InventoryCreate, InventoryRead
 
-router = APIRouter(prefix="/inventories", tags=["Inventories"])
+router = APIRouter(prefix="/inventory", tags=["Inventory"])
 
-@router.post("/", response_model=Inventory)
-def create_inventory(inventory: InventoryCreate, db: FakeDatabase = Depends(get_db)):
-    new_id = len(db.inventories) + 1
-    new_inventory = InventoryModel(
-        id=new_id,
-        character_id=inventory.character_id,
-        capacity=inventory.capacity,
-        weight_limit=inventory.weight_limit,
-        current_weight=inventory.current_weight,
-    )
-    db.inventories.append(new_inventory)
-    return new_inventory
+@router.get("/", response_model=list[InventoryRead])
+async def list_inventory(
+    character_id: Optional[int] = Query(None, description="ID персонажа для фильтрации"),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Если передан character_id — вернёт только предметы этого персонажа,
+    иначе — без фильтрации, все записи из inventory.
+    """
+    stmt = select(InventoryModel)
+    if character_id is not None:
+        stmt = stmt.where(InventoryModel.character_id == character_id)
+    result = await db.execute(stmt)
+    return result.scalars().all()
 
-@router.get("/", response_model=List[Inventory])
-def get_inventories(db: FakeDatabase = Depends(get_db)):
-    return db.inventories
+@router.get("/", response_model=list[InventoryRead])
+async def list_inventory(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(InventoryModel))
+    return result.scalars().all()
 
-@router.get("/{inventory_id}", response_model=Inventory)
-def get_inventory(inventory_id: int, db: FakeDatabase = Depends(get_db)):
-    inventory = next((i for i in db.inventories if i.id == inventory_id), None)
-    if inventory is None:
-        raise HTTPException(status_code=404, detail="Inventory not found")
-    return inventory
+@router.post("/", response_model=InventoryRead, status_code=201)
+async def add_to_inventory(data: InventoryCreate, db: AsyncSession = Depends(get_db)):
+    inv = InventoryModel(**data.dict())
+    db.add(inv)
+    await db.commit()
+    await db.refresh(inv)
+    return inv
 
-@router.put("/{inventory_id}", response_model=Inventory)
-def update_inventory(inventory_id: int, inventory_update: InventoryUpdate, db: FakeDatabase = Depends(get_db)):
-    inventory = next((i for i in db.inventories if i.id == inventory_id), None)
-    if inventory is None:
-        raise HTTPException(status_code=404, detail="Inventory not found")
-    if inventory_update.capacity is not None:
-        inventory.capacity = inventory_update.capacity
-    if inventory_update.weight_limit is not None:
-        inventory.weight_limit = inventory_update.weight_limit
-    if inventory_update.current_weight is not None:
-        inventory.current_weight = inventory_update.current_weight
-    return inventory
+@router.get("/{inv_id}", response_model=InventoryRead)
+async def read_inventory(inv_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(InventoryModel).where(InventoryModel.id == inv_id))
+    inv = result.scalar_one_or_none()
+    if not inv:
+        raise HTTPException(404, "Not found")
+    return inv
 
-@router.delete("/{inventory_id}")
-def delete_inventory(inventory_id: int, db: FakeDatabase = Depends(get_db)):
-    inventory = next((i for i in db.inventories if i.id == inventory_id), None)
-    if inventory is None:
-        raise HTTPException(status_code=404, detail="Inventory not found")
-    db.inventories.remove(inventory)
-    return {"detail": "Inventory deleted"}
+@router.delete("/{inv_id}", status_code=204)
+async def remove_from_inventory(inv_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(InventoryModel).where(InventoryModel.id == inv_id))
+    inv = result.scalar_one_or_none()
+    if not inv:
+        raise HTTPException(404, "Not found")
+    await db.delete(inv)
+    await db.commit()

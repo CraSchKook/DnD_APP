@@ -1,29 +1,55 @@
-from fastapi import APIRouter, Depends
-from app.schemas.ability import Ability
-from app.dependencies.ability_db import FakeAbilityDatabase, get_ability_db
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+from sqlalchemy.orm import selectinload
 
-router = APIRouter(
-    prefix="/abilities",
-    tags=["Abilities"]
-)
+from app.database import get_db
+from app.models.ability import Ability as AbilityModel
+from app.schemas.ability import AbilityCreate, AbilityRead, AbilityUpdate
 
-@router.get("/", response_model=list[Ability])
-async def get_abilities(db: FakeAbilityDatabase = Depends(get_ability_db)):
-    return db.list_abilities()
+router = APIRouter(prefix="/abilities", tags=["Abilities"])
 
-@router.get("/{ability_id}", response_model=Ability)
-async def get_ability(ability_id: int, db: FakeAbilityDatabase = Depends(get_ability_db)):
-    return db.get_ability(ability_id)
+@router.get("/", response_model=list[AbilityRead])
+async def list_abilities(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(AbilityModel)
+        .options(selectinload(AbilityModel.character))
+    )
+    return result.scalars().all()
 
-@router.post("/", response_model=Ability, status_code=201)
-async def create_ability(ability: Ability, db: FakeAbilityDatabase = Depends(get_ability_db)):
-    return db.create_ability(ability)
+@router.get("/{ability_id}", response_model=AbilityRead)
+async def read_ability(ability_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(AbilityModel).where(AbilityModel.id == ability_id))
+    ability = result.scalar_one_or_none()
+    if not ability:
+        raise HTTPException(404, "Ability not found")
+    return ability
 
-@router.put("/{ability_id}", response_model=Ability)
-async def update_ability(ability_id: int, updated: Ability, db: FakeAbilityDatabase = Depends(get_ability_db)):
-    return db.update_ability(ability_id, updated)
+@router.post("/", response_model=AbilityRead, status_code=201)
+async def create_ability(data: AbilityCreate, db: AsyncSession = Depends(get_db)):
+    ability = AbilityModel(**data.dict())
+    db.add(ability)
+    await db.commit()
+    await db.refresh(ability)
+    return ability
+
+@router.put("/{ability_id}", response_model=AbilityRead)
+async def update_ability(ability_id: int, data: AbilityUpdate, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(AbilityModel).where(AbilityModel.id == ability_id))
+    ability = result.scalar_one_or_none()
+    if not ability:
+        raise HTTPException(404, "Ability not found")
+    for field, value in data.dict(exclude_unset=True).items():
+        setattr(ability, field, value)
+    await db.commit()
+    await db.refresh(ability)
+    return ability
 
 @router.delete("/{ability_id}", status_code=204)
-async def delete_ability(ability_id: int, db: FakeAbilityDatabase = Depends(get_ability_db)):
-    db.delete_ability(ability_id)
-    return
+async def delete_ability(ability_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(AbilityModel).where(AbilityModel.id == ability_id))
+    ability = result.scalar_one_or_none()
+    if not ability:
+        raise HTTPException(404, "Ability not found")
+    await db.delete(ability)
+    await db.commit()

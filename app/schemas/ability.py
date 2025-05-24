@@ -1,8 +1,23 @@
-from pydantic import BaseModel, Field
+# app/schemas/ability.py
+from pydantic import BaseModel
+from typing import Optional
 
-class Ability(BaseModel):
-    id: int = Field(..., description="Уникальный ID способности")
-    name: str = Field(..., description="Название способности")
-    description: str | None = Field(None, description="Описание способности")
-    cooldown: int = Field(..., description="Время восстановления (в секундах)")
-    character_id: int = Field(..., description="ID персонажа-владельца способности")
+class AbilityBase(BaseModel):
+    name: str
+    description: Optional[str] = None
+    cooldown: float = 0.0
+    character_id: int
+
+class AbilityCreate(AbilityBase):
+    pass
+
+class AbilityRead(AbilityBase):
+    id: int
+
+    class Config:
+        from_attributes = True
+
+class AbilityUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    cooldown: Optional[float] = None

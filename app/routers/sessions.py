@@ -1,30 +1,37 @@
 from fastapi import APIRouter, Depends
-from app.schemas.session import Session
-from app.dependencies.session_db import FakeSessionDatabase, get_session_db
-from datetime import datetime
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.database import get_db
+from app.schemas.session import SessionCreate, SessionRead, SessionUpdate
+from app.services.session_service import (
+    get_all_sessions,
+    get_session_by_id,
+    create_session,
+    update_session,
+    delete_session
+)
 
 router = APIRouter(
     prefix="/sessions",
     tags=["Sessions"]
 )
 
-@router.get("/", response_model=list[Session])
-async def get_sessions(db: FakeSessionDatabase = Depends(get_session_db)):
-    return db.list_sessions()
+@router.get("/", response_model=list[SessionRead])
+async def list_sessions(db: AsyncSession = Depends(get_db)):
+    return await get_all_sessions(db)
 
-@router.get("/{session_id}", response_model=Session)
-async def get_session(session_id: int, db: FakeSessionDatabase = Depends(get_session_db)):
-    return db.get_session(session_id)
+@router.get("/{session_id}", response_model=SessionRead)
+async def read_session(session_id: int, db: AsyncSession = Depends(get_db)):
+    return await get_session_by_id(session_id, db)
 
-@router.post("/", response_model=Session, status_code=201)
-async def create_session(session: Session, db: FakeSessionDatabase = Depends(get_session_db)):
-    return db.create_session(session)
+@router.post("/", response_model=SessionRead, status_code=201)
+async def add_session(data: SessionCreate, db: AsyncSession = Depends(get_db)):
+    return await create_session(data, db)
 
-@router.put("/{session_id}", response_model=Session)
-async def update_session(session_id: int, updated: Session, db: FakeSessionDatabase = Depends(get_session_db)):
-    return db.update_session(session_id, updated)
+@router.put("/{session_id}", response_model=SessionRead)
+async def edit_session(session_id: int, data: SessionUpdate, db: AsyncSession = Depends(get_db)):
+    return await update_session(session_id, data, db)
 
 @router.delete("/{session_id}", status_code=204)
-async def delete_session(session_id: int, db: FakeSessionDatabase = Depends(get_session_db)):
-    db.delete_session(session_id)
-    return
+async def remove_session(session_id: int, db: AsyncSession = Depends(get_db)):
+    await delete_session(session_id, db)
