@@ -1,29 +1,40 @@
-from fastapi import APIRouter, Depends
-from app.schemas.map import Map
-from app.dependencies.map_db import FakeMapDatabase, get_map_db
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+from typing import List
 
-router = APIRouter(
-    prefix="/maps",
-    tags=["Maps"]
-)
+from app.database import get_db
+from app.models.map import Map as MapModel
+from app.schemas.map import MapCreate, MapRead
 
-@router.get("/", response_model=list[Map])
-async def get_maps(db: FakeMapDatabase = Depends(get_map_db)):
-    return db.list_maps()
+router = APIRouter(prefix="/maps", tags=["Maps"])
 
-@router.get("/{map_id}", response_model=Map)
-async def get_map(map_id: int, db: FakeMapDatabase = Depends(get_map_db)):
-    return db.get_map(map_id)
+@router.get("/", response_model=List[MapRead])
+async def list_maps(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(MapModel))
+    return result.scalars().all()
 
-@router.post("/", response_model=Map, status_code=201)
-async def create_map(map_obj: Map, db: FakeMapDatabase = Depends(get_map_db)):
-    return db.create_map(map_obj)
+@router.get("/{map_id}", response_model=MapRead)
+async def read_map(map_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(MapModel).where(MapModel.id == map_id))
+    map_obj = result.scalar_one_or_none()
+    if not map_obj:
+        raise HTTPException(404, detail="Map not found")
+    return map_obj
 
-@router.put("/{map_id}", response_model=Map)
-async def update_map(map_id: int, updated: Map, db: FakeMapDatabase = Depends(get_map_db)):
-    return db.update_map(map_id, updated)
+@router.post("/", response_model=MapRead, status_code=201)
+async def create_map(data: MapCreate, db: AsyncSession = Depends(get_db)):
+    map_obj = MapModel(**data.dict())
+    db.add(map_obj)
+    await db.commit()
+    await db.refresh(map_obj)
+    return map_obj
 
 @router.delete("/{map_id}", status_code=204)
-async def delete_map(map_id: int, db: FakeMapDatabase = Depends(get_map_db)):
-    db.delete_map(map_id)
-    return
+async def delete_map(map_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(MapModel).where(MapModel.id == map_id))
+    map_obj = result.scalar_one_or_none()
+    if not map_obj:
+        raise HTTPException(404, detail="Map not found")
+    await db.delete(map_obj)
+    await db.commit()

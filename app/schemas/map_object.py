@@ -1,9 +1,21 @@
 from pydantic import BaseModel, Field
+from typing import Optional, Dict, Any
 
-class MapObject(BaseModel):
-    id: int = Field(..., description="Уникальный ID объекта на карте")
+class MapObjectBase(BaseModel):
+    name: str = Field(..., description="Название объекта на карте")
+    type: str = Field(..., description="Тип объекта (например, 'стена', 'дверь', 'ловушка')")
+    position: Dict[str, int] = Field(..., description="Позиция объекта на карте: {'x': int, 'y': int}")
+    properties: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Дополнительные свойства объекта (например, состояние, взаимодействие)"
+    )
+
+class MapObjectCreate(MapObjectBase):
     map_id: int = Field(..., description="ID карты, к которой привязан объект")
-    type: str = Field(..., description="Тип объекта (стена, дверь, ловушка и т.п.)")
-    x: int = Field(..., description="Координата X на сетке карты")
-    y: int = Field(..., description="Координата Y на сетке карты")
-    state: str | None = Field(None, description="Состояние объекта (например, 'закрыто', 'активно')")
+
+class MapObjectRead(MapObjectBase):
+    id: int = Field(..., description="Уникальный ID объекта")
+    map_id: int = Field(..., description="ID карты, к которой привязан объект")
+
+    class Config:
+        from_attributes = True
