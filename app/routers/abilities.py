@@ -7,7 +7,6 @@ from sqlalchemy.orm import selectinload
 from app.database import get_db
 from app.models.ability import Ability as AbilityModel
 from app.models.character import Character as CharacterModel
-from app.models.npc import NPC as NPCModel
 from app.schemas.ability import AbilityCreate, AbilityRead, AbilityUpdate
 
 router = APIRouter(prefix="/abilities", tags=["Abilities"])
@@ -51,12 +50,6 @@ async def create_ability(data: AbilityCreate, db: AsyncSession = Depends(get_db)
             select(CharacterModel).where(CharacterModel.id.in_(data.character_ids))
         )
         ability.characters = chars.scalars().all()
-    # Привязка к NPC
-    if data.npc_ids:
-        npcs = await db.execute(
-            select(NPCModel).where(NPCModel.id.in_(data.npc_ids))
-        )
-        ability.npcs = npcs.scalars().all()
 
     db.add(ability)
     await db.commit()
@@ -87,11 +80,6 @@ async def update_ability(ability_id: int, data: AbilityUpdate, db: AsyncSession 
             select(CharacterModel).where(CharacterModel.id.in_(data.character_ids))
         )
         ability.characters = chars.scalars().all()
-    if data.npc_ids is not None:
-        npcs = await db.execute(
-            select(NPCModel).where(NPCModel.id.in_(data.npc_ids))
-        )
-        ability.npcs = npcs.scalars().all()
 
     await db.commit()
     await db.refresh(ability)

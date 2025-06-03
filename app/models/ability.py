@@ -11,13 +11,6 @@ character_abilities = Table(
     Column('ability_id', ForeignKey('abilities.id', ondelete='CASCADE'), primary_key=True),
 )
 
-npc_abilities = Table(
-    'npc_abilities',
-    Base.metadata,
-    Column('npc_id', ForeignKey('npcs.id', ondelete='CASCADE'), primary_key=True),
-    Column('ability_id', ForeignKey('abilities.id', ondelete='CASCADE'), primary_key=True),
-)
-
 class Ability(Base):
     __tablename__ = "abilities"
 
@@ -30,12 +23,6 @@ class Ability(Base):
     characters = relationship(
         "Character",
         secondary=character_abilities,
-        back_populates="abilities",
-        cascade="all, delete"
-    )
-    npcs = relationship(
-        "NPC",
-        secondary=npc_abilities,
         back_populates="abilities",
         cascade="all, delete"
     )
