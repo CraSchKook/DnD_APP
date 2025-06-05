@@ -39,11 +39,16 @@ async def list_my_characters(
     """
     Вернуть всех персонажей, принадлежащих текущему (залогиненному) игроку.
     """
-    # selectinload загружает способности сразу вместе с персонажем
     result = await db.execute(
         select(CharacterModel)
         .where(CharacterModel.player_id == current_user.id)
-        .options(selectinload(CharacterModel.abilities))
+        .options(
+            selectinload(CharacterModel.race),
+            selectinload(CharacterModel.profession),
+            selectinload(CharacterModel.level),
+            selectinload(CharacterModel.abilities),
+            selectinload(CharacterModel.inventory_items),
+        )
     )
     return result.scalars().all()
 
@@ -59,7 +64,13 @@ async def get_character(character_id: int, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
         select(CharacterModel)
         .where(CharacterModel.id == character_id)
-        .options(selectinload(CharacterModel.abilities))
+        .options(
+            selectinload(CharacterModel.race),
+            selectinload(CharacterModel.profession),
+            selectinload(CharacterModel.level),
+            selectinload(CharacterModel.abilities),
+            selectinload(CharacterModel.inventory_items),
+        )
     )
     character = result.scalar_one_or_none()
     if not character:
@@ -106,7 +117,7 @@ async def create_character(
     # if new_char.player_id != current_user.id:
     #     raise HTTPException(status_code=403, detail="Cannot create character for another user")
 
-    # --- Шаг 3: вычисление финальных статов ---
+    # --- Шаг 2: вычисление финальных статов ---
     final_stats = compute_final_stats(
         race_obj,
         cls_obj,
@@ -118,14 +129,6 @@ async def create_character(
         wisdom_user=new_char.wisdom_user,
         charisma_user=new_char.charisma_user
     )
-    # compute_final_stats вернул словарь вида:
-    # {
-    #   "hp": 25,
-    #   "armor": 12,
-    #   "strength": 15,
-    #   "dexterity": 14,
-    #   … и т. д.
-    # }
 
     character = CharacterModel(
         name=new_char.name,
@@ -156,6 +159,21 @@ async def create_character(
     db.add(character)
     await db.commit()
     await db.refresh(character)
+
+    # ← Добавляем повторную загрузку с .options(selectinload(...))
+    result = await db.execute(
+        select(CharacterModel)
+        .where(CharacterModel.id == character.id)
+        .options(
+            selectinload(CharacterModel.race),
+            selectinload(CharacterModel.profession),
+            selectinload(CharacterModel.level),
+            selectinload(CharacterModel.abilities),
+            selectinload(CharacterModel.inventory_items),
+        )
+    )
+    character = result.scalar_one()
+
     return character
 
 
@@ -173,7 +191,13 @@ async def update_character(
     result = await db.execute(
         select(CharacterModel)
         .where(CharacterModel.id == character_id)
-        .options(selectinload(CharacterModel.abilities))
+        .options(
+            selectinload(CharacterModel.abilities),
+            selectinload(CharacterModel.race),
+            selectinload(CharacterModel.profession),
+            selectinload(CharacterModel.level),
+            selectinload(CharacterModel.inventory_items),
+        )
     )
     character = result.scalar_one_or_none()
     if not character:
@@ -197,7 +221,19 @@ async def update_character(
 
     await db.commit()
     await db.refresh(character)  
-    return character
+    
+    result = await db.execute(
+        select(CharacterModel)
+        .where(CharacterModel.id == character.id)
+        .options(
+            selectinload(CharacterModel.race),
+            selectinload(CharacterModel.profession),
+            selectinload(CharacterModel.level),
+            selectinload(CharacterModel.abilities),
+            selectinload(CharacterModel.inventory_items),
+        )
+    )
+    return result.scalar_one()
 
 
 @router.delete("/{character_id}", status_code=204)
@@ -244,10 +280,16 @@ async def character_inventory(character_id: int, db: AsyncSession = Depends(get_
 @router.get("/", response_model=List[CharacterRead])
 async def get_all_characters(
     db: AsyncSession = Depends(get_db),
-    current_user: PlayerModel = Depends(require_active_as("master"))  # ← проверка роли
+    current_user: PlayerModel = Depends(require_active_as("master"))
 ):
     result = await db.execute(
-        select(CharacterModel).options(selectinload(CharacterModel.abilities))
+        select(CharacterModel).options(
+            selectinload(CharacterModel.race),
+            selectinload(CharacterModel.profession),
+            selectinload(CharacterModel.level),
+            selectinload(CharacterModel.abilities),
+            selectinload(CharacterModel.inventory_items),
+        )
     )
     return result.scalars().all()
 
@@ -263,7 +305,13 @@ async def list_available_npcs(
         select(CharacterModel)
         .where(CharacterModel.is_npc == True)
         .where(CharacterModel.player_id == None)
-        .options(selectinload(CharacterModel.abilities))
+        .options(
+            selectinload(CharacterModel.race),
+            selectinload(CharacterModel.profession),
+            selectinload(CharacterModel.level),
+            selectinload(CharacterModel.abilities),
+            selectinload(CharacterModel.inventory_items),
+        )
     )
     return result.scalars().all()
 

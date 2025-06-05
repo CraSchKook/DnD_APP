@@ -5,6 +5,7 @@ from app.schemas.ability import AbilityRead
 from app.schemas.race import RaceRead
 from app.schemas.profession import ProfessionRead
 from app.schemas.level import LevelRead
+from app.schemas.inventory import InventoryRead
 
 class CharacterBase(BaseModel):
     name: str = Field(..., description="Имя персонажа")
@@ -35,33 +36,30 @@ class CharacterCreate(CharacterBase):
 class CharacterUpdate(BaseModel):
     name: Optional[str] = Field(None, description="Новое имя персонажа")
     session_id: Optional[int] = Field(None, description="Обновлённый ID сессии")
-    strength_user: Optional[int] = None
-    dexterity_user: Optional[int] = None
-    constitution_user: Optional[int] = None
-    intelligence_user: Optional[int] = None
-    wisdom_user: Optional[int] = None
-    charisma_user: Optional[int] = None
+    strength_user: Optional[int] = Field(None, description="Показатель Силы")
+    dexterity_user: Optional[int] = Field(None, description="Показатель Ловкости")
+    constitution_user: Optional[int] = Field(None, description="Показатель Телосложения")
+    intelligence_user: Optional[int] = Field(None, description="Показатель Интеллекта")
+    wisdom_user: Optional[int] = Field(None, description="Показатель Мудрости")
+    charisma_user: Optional[int] = Field(None, description="Показатель Харизмы")
 
-    race_id: Optional[int] = None
-    profession_id: Optional[int] = None
-    level_id: Optional[int] = None
+    race_id: Optional[int] = Field(None, description="ID расы (из списка /races)")
+    profession_id: Optional[int] = Field(None, description="ID класса (из списка /professions)")
+    level_id: Optional[int] = Field(None, description="ID уровня (из списка /levels)")
 
     ability_ids: Optional[List[int]] = None
-    is_npc: Optional[bool] = None
-    avatar_url: Optional[str] = None
+    is_npc: Optional[bool] = Field(default=None, description="Является ли NPC")
+    avatar_url: Optional[str] = Field(None, description="URL аватара персонажа")
 
 class CharacterRead(BaseModel):
     id: int = Field(..., description="ID персонажа")
     name: str
-    player_id: int
+    player_id: Optional[int]
     session_id: Optional[int]
 
-    # Теперь мы хотим возвращать не «race_id», а уже всю RaceRead
     race: RaceRead
-    # и тоже для класса:
-    profession: ProfessionRead = Field(..., alias="profession")
-    # и информация про уровень:
-    level: LevelRead = Field(..., alias="level_ref")
+    profession: ProfessionRead
+    level: LevelRead
 
     hp: int
     armor: int
@@ -76,7 +74,8 @@ class CharacterRead(BaseModel):
     avatar_url: Optional[str] = None
 
     abilities: List[AbilityRead] = Field(default_factory=list)
+    inventory_items: List[InventoryRead] = []
 
     class Config:
         orm_mode = True
-        allow_population_by_field_name = True  # чтобы alias="class_ref" работал
+        model_config = {"from_attributes": True}

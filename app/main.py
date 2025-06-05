@@ -1,6 +1,8 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -24,6 +26,7 @@ import app.models.theme
 from app.seed.races import seed_races
 from app.seed.professions import seed_professions
 from app.seed.levels import seed_levels
+from app.seed.abilities import seed_abilities
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -41,10 +44,28 @@ async def lifespan(app: FastAPI):
         await seed_races(db)
         await seed_professions(db)
         await seed_levels(db)
+        await seed_abilities(db)
     print("✔ Seed-данные загружены.")
     yield
 
 app = FastAPI(lifespan=lifespan)
+
+# Разрешение адресов для запросов
+origins = [
+    "http://localhost:5173", # локальный сервер дев
+    "http://localhost:4173/" # локальный сервер билда
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins, # разрешенные адреса
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Монтируем каталог 'static' на URL '/static'
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 # --- Подключение всех роутеров ---
 from app.routers.auth import router as auth_router

@@ -1,4 +1,3 @@
-# app/core/rules.py
 from typing import Dict
 from app.models.race import Race
 from app.models.profession import Profession
@@ -16,15 +15,15 @@ def compute_final_stats(
     charisma_user: int
 ) -> Dict[str, int]:
     """
-    Рассчитывает финальные статы персонажа, комбинируя:
-    • «сырые» пользовательские 6 характеристик (strength_user, …).
-    • бонусы или штрафы расы (race.*_bonus).
-    • бонусы или штрафы класса (cls.*_bonus).
-    • бонусы уровня: lvl.hp_increase, lvl.bonus_attribute.
-    • базовые HP (hit_die у класса) и AC (например, 10 + модификатор dexterity).
+    Рассчитывает финальные статы персонажа с учётом:
+    1. «Сырого» ввода игрока (strength_user, dexterity_user и т.д.).
+    2. Бонусов/штрафов расы (race.*_bonus).
+    3. Бонусов/штрафов класса (cls.*_bonus).
+    4. Базового HP на 1-м уровне (hit_die) + расовый бонус (race.extra_hp * lvl.id) + модификатор CON.
+    5. AC (Armor Class) = 8 + модификатор DEX.
     """
 
-    # 1. Начальные «сырые» статы
+    # 1. Начальные «сырые» статы (до бонусов расы/класса)
     base = {
         "strength": strength_user,
         "dexterity": dexterity_user,
@@ -34,52 +33,47 @@ def compute_final_stats(
         "charisma": charisma_user,
     }
 
-    # 2. Применяем бонусы/штрафы расы
-    base["strength"] += race.strength_bonus
-    base["dexterity"] += race.dexterity_bonus
+    # 2. Применяем бонусы/штрафы расы к базовым статам
+    base["strength"]     += race.strength_bonus
+    base["dexterity"]    += race.dexterity_bonus
     base["constitution"] += race.constitution_bonus
     base["intelligence"] += race.intelligence_bonus
-    base["wisdom"] += race.wisdom_bonus
-    base["charisma"] += race.charisma_bonus
+    base["wisdom"]       += race.wisdom_bonus
+    base["charisma"]     += race.charisma_bonus
 
-    # 3. Применяем бонусы/штрафы класса
-    base["strength"] += cls.strength_bonus
-    base["dexterity"] += cls.dexterity_bonus
+    # 3. Применяем бонусы/штрафы класса (профессии) к базовым статам
+    base["strength"]     += cls.strength_bonus
+    base["dexterity"]    += cls.dexterity_bonus
     base["constitution"] += cls.constitution_bonus
     base["intelligence"] += cls.intelligence_bonus
-    base["wisdom"] += cls.wisdom_bonus
-    base["charisma"] += cls.charisma_bonus
+    base["wisdom"]       += cls.wisdom_bonus
+    base["charisma"]     += cls.charisma_bonus
 
-    # 4. Модификаторы: обычно (stat - 10) // 2
-    #    Например, если strength = 14, мод = +2; если 9 → -1
+    # 4. Вычисляем модификаторы: (stat - 10) // 2
     def ability_modifier(stat_value: int) -> int:
         return (stat_value - 10) // 2
 
     mods = {stat: ability_modifier(val) for stat, val in base.items()}
 
     # 5. Рассчитываем HP:
-    #    Обычно: на 1 уровне HP = hit_die (например, Fighter=10) + модификатор конституции
-    #             + бонус уровня (lvl.hp_increase) * (level - 1)  (если вы хотите масштаб)
-    #    Для простоты сделаем: 
-    #       hp = cls.hit_die + mods["constitution"] + lvl.hp_increase
-    #
-    hp = cls.hit_die + mods["constitution"] + lvl.hp_increase
+    #    hit_die (например, 8) + модификатор CON + (lvl.id * race.extra_hp)
+    #    lvl.id — номер уровня (1, 2, 3 и т.д.), race.extra_hp — бонус HP от расы на каждый уровень
+    hp_total = cls.hit_die + mods["constitution"] + lvl.id * race.extra_hp
 
-    # 6. Рассчитываем Armor (AC):
-    #    Классическая формула: 10 + модификатор dexterity
-    armor = 10 + mods["dexterity"]
+    # 6. Рассчитываем Armor Class (AC):
+    #    Базовая формула: 8 + модификатор DEX
+    armor = 8 + mods["dexterity"]
 
-    # 7. Если lvl.bonus_attribute указан, поднять этот атрибут ещё на +1:
+    # 7. Если lvl.bonus_attribute указан, повышаем соответствующий атрибут на +1 (не влияет на HP здесь)
     if lvl.bonus_attribute:
-        stat_name = lvl.bonus_attribute.lower()  # ожидаем, что это допустимый ключ, например, "strength"
+        stat_name = lvl.bonus_attribute.lower()
         if stat_name in base:
             base[stat_name] += 1
             mods[stat_name] = ability_modifier(base[stat_name])
-            # Можно учитывать это в HP (если это constitution), но для простоты оставим как есть.
 
-    # 8. Финальный словарь:
+    # 8. Составляем итоговый словарь с финальными статами
     final = {
-        "hp": hp,
+        "hp": hp_total,
         "armor": armor,
         "strength": base["strength"],
         "dexterity": base["dexterity"],

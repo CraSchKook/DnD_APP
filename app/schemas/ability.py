@@ -1,27 +1,53 @@
-# app/schemas/ability.py
-from pydantic import BaseModel
-from typing import Optional, List
+from pydantic import BaseModel, Field
+from typing import List, Optional
 
 class AbilityBase(BaseModel):
-    name: str
-    description: Optional[str] = None
-    cooldown: float = 0.0
+    name: str = Field(..., description="Название способности")
+    description: Optional[str] = Field("", description="Описание")
+    cooldown: float = Field(0.0, description="Время перезарядки в секундах")
+    #allowed_races: List[str] = Field(default_factory=list, description="Названия рас, которым доступна абилка")
+    #allowed_professions: List[str] = Field(default_factory=list, description="Названия классов, которым доступна абилка")
+
+    model_config = {"from_attributes": True}
 
 class AbilityCreate(AbilityBase):
-    character_ids: Optional[List[int]] = []
-    npc_ids: Optional[List[int]] = []
+    allowed_race_names: Optional[List[str]] = Field(
+        default_factory=list,
+        description="Названия рас, которым доступна способность"
+    )
+    allowed_profession_names: Optional[List[str]] = Field(
+        default_factory=list,
+        description="Названия классов, которым доступна способность"
+    )
+    character_ids: Optional[List[int]] = Field(
+        default_factory=list,
+        description="ID персонажей, кому выдать способность"
+    )
 
-class AbilityRead(AbilityBase):
-    id: int
-    character_ids: List[int] = []
-    npc_ids: List[int] = []
-
-    class Config:
-        orm_mode = True
 
 class AbilityUpdate(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    cooldown: Optional[float] = None
-    character_ids: Optional[List[int]] = None
-    npc_ids: Optional[List[int]] = None
+    name: Optional[str] = Field(None, description="Новое название способности")
+    description: Optional[str] = Field(None, description="Новое описание")
+    cooldown: Optional[float] = Field(None, description="Новое значение перезарядки")
+    allowed_race_names: Optional[List[str]] = Field(
+        default=None,
+        description="Обновлённый список рас по названиям"
+    )
+    allowed_profession_names: Optional[List[str]] = Field(
+        default=None,
+        description="Обновлённый список классов по названиям"
+    )
+    character_ids: Optional[List[int]] = Field(
+        default=None,
+        description="Список ID персонажей для связи"
+    )
+
+    model_config = {"from_attributes": True}
+
+class AbilityRead(AbilityBase):
+    id: int = Field(..., description="ID способности")
+    allowed_races: List[str] = Field(default_factory=list, description="Названия рас, которым доступна способность")
+    allowed_professions: List[str] = Field(default_factory=list, description="Названия классов, которым доступна способность")
+    character_ids: List[int] = Field(default_factory=list, description="ID персонажей, у которых есть способность")
+
+    model_config = {"from_attributes": True}

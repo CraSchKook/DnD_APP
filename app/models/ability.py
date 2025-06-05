@@ -11,6 +11,22 @@ character_abilities = Table(
     Column('ability_id', ForeignKey('abilities.id', ondelete='CASCADE'), primary_key=True),
 )
 
+# Новая таблица: Race ↔ Ability
+race_abilities = Table(
+    'race_abilities',
+    Base.metadata,
+    Column('race_id', ForeignKey('races.id', ondelete='CASCADE'), primary_key=True),
+    Column('ability_id', ForeignKey('abilities.id', ondelete='CASCADE'), primary_key=True),
+)
+
+# Новая таблица: Profession ↔ Ability
+profession_abilities = Table(
+    'profession_abilities',
+    Base.metadata,
+    Column('profession_id', ForeignKey('professions.id', ondelete='CASCADE'), primary_key=True),
+    Column('ability_id', ForeignKey('abilities.id', ondelete='CASCADE'), primary_key=True),
+)
+
 class Ability(Base):
     __tablename__ = "abilities"
 
@@ -19,7 +35,7 @@ class Ability(Base):
     description = Column(String, default="")
     cooldown = Column(Float, default=0.0)
 
-    # Many-to-Many relationships:
+    # Many-to-Many: Character ↔ Ability
     characters = relationship(
         "Character",
         secondary=character_abilities,
@@ -27,17 +43,16 @@ class Ability(Base):
         cascade="all, delete"
     )
 
-# from sqlalchemy import Column, Integer, String, ForeignKey, Float
-# from sqlalchemy.orm import relationship
-# from app.database import Base
+    # Many-to-Many: Race ↔ Ability (теперь можем проверять расовые ограничения)
+    races = relationship(
+        "Race",
+        secondary=race_abilities,
+        back_populates="abilities"
+    )
 
-# class Ability(Base):
-#     __tablename__ = "abilities"
-
-#     id = Column(Integer, primary_key=True, index=True)
-#     character_id = Column(Integer, ForeignKey("characters.id"), nullable=False) # привязка
-#     name = Column(String, nullable=False) # название
-#     description = Column(String, default="") # описание
-#     cooldown = Column(Float, default=0.0)  # время перезарядки в секундах
-
-#     character = relationship("Character", back_populates="abilities")
+    # Many-to-Many: Profession ↔ Ability (для классовых ограничений)
+    professions = relationship(
+        "Profession",
+        secondary=profession_abilities,
+        back_populates="abilities"
+    )

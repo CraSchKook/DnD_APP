@@ -305,6 +305,7 @@ def compute_final_stats(
     return final
 
 
+
 === ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\dependencies\ability_db.py ===
 from typing import List
 from fastapi import HTTPException
@@ -2821,12 +2822,11 @@ from sqlalchemy import select
 from app.models.level import Level
 
 async def seed_levels(db: AsyncSession):
-    for lvl in range(1, 21):  # D&D обычно от 1 до 20 уровня
-        exists = await db.execute(select(Level).where(Level.level_number == lvl))
+    for lvl in range(1, 21): # D&D обычно от 1 до 20 уровня
+        exists = await db.execute(select(Level).where(Level.id == lvl))
         if not exists.scalar_one_or_none():
-            db.add(Level(level_number=lvl, xp_required=(lvl - 1) * 1000))
+            db.add(Level(id=lvl, hp_increase=5, bonus_attribute="None", description=""))
     await db.commit()
-
 
 
 === ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\seed\professions.py ===
@@ -2837,9 +2837,9 @@ from app.models.profession import Profession
 
 async def seed_professions(db: AsyncSession):
     professions = [
-        {"name": "Fighter", "base_armor": 16, "base_hp": 12},
-        {"name": "Wizard", "base_armor": 10, "base_hp": 6},
-        {"name": "Rogue", "base_armor": 14, "base_hp": 8},
+        {"name": "Fighter", "hit_die": 10},  # d10 для Fighter
+        {"name": "Wizard", "hit_die": 6},    # d6 для Wizard
+        {"name": "Rogue", "hit_die": 8},     # d8 для Rogue
     ]
     for prof in professions:
         exists = await db.execute(select(Profession).where(Profession.name == prof["name"]))
@@ -2991,3 +2991,4 @@ async def delete_session(session_id: int, db: AsyncSession):
     session = await get_session_by_id(session_id, db)
     await db.delete(session)
     await db.commit()
+

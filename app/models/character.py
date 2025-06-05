@@ -16,7 +16,7 @@ class Character(Base):
     session_id = Column(Integer, ForeignKey("sessions.id"), nullable=True)
 
     race_id = Column(Integer, ForeignKey("races.id"), nullable=False)
-    race_ref = relationship("Race", back_populates="characters")
+    race = relationship("Race", back_populates="characters")
 
     profession_id = Column(Integer, ForeignKey("professions.id")) # НА САМОМ ДЕЛЕ ЭТО КЛАСС
     profession = relationship("Profession", back_populates="characters") # НА САМОМ ДЕЛЕ ЭТО КЛАСС

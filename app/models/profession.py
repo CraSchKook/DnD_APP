@@ -17,4 +17,12 @@ class Profession(Base):
     wisdom_bonus = Column(Integer, default=0)
     charisma_bonus = Column(Integer, default=0)
 
+    # Существующая связь к персонажам
     characters = relationship("Character", back_populates="profession")
+
+    # Новое поле: какие способности доступны этому классу
+    abilities = relationship(
+        "Ability",
+        secondary="profession_abilities",
+        back_populates="professions"
+    )
