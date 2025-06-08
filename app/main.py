@@ -53,7 +53,9 @@ app = FastAPI(lifespan=lifespan)
 # Разрешение адресов для запросов
 origins = [
     "http://localhost:5173", # локальный сервер дев
-    "http://localhost:4173/" # локальный сервер билда
+    "http://localhost:4173/", # локальный сервер билда
+    "https://mini.shadstar.ru",
+    "https://t.me/Shadowstar_master_bot"
 ]
 
 app.add_middleware(
