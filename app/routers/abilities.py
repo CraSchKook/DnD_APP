@@ -32,6 +32,7 @@ async def list_abilities(db: AsyncSession = Depends(get_db)):
             name=ability.name,
             description=ability.description,
             cooldown=ability.cooldown,
+            activation_condition=ability.activation_condition,
             allowed_races=[r.name for r in ability.races],
             allowed_professions=[p.name for p in ability.professions],
             character_ids=[c.id for c in ability.characters]
@@ -62,6 +63,7 @@ async def read_ability(ability_id: int, db: AsyncSession = Depends(get_db)):
         name=ability.name,
         description=ability.description,
         cooldown=ability.cooldown,
+        activation_condition=ability.activation_condition,
         allowed_races=[r.name for r in ability.races],
         allowed_professions=[p.name for p in ability.professions],
         character_ids=[c.id for c in ability.characters]
@@ -75,7 +77,8 @@ async def create_ability(data: AbilityCreate, db: AsyncSession = Depends(get_db)
     ability = AbilityModel(
         name=data.name,
         description=data.description,
-        cooldown=data.cooldown
+        cooldown=data.cooldown,
+        activation_condition=data.activation_condition
     )
 
     # Привязка к расам
@@ -102,6 +105,7 @@ async def create_ability(data: AbilityCreate, db: AsyncSession = Depends(get_db)
         name=ability.name,
         description=ability.description,
         cooldown=ability.cooldown,
+        activation_condition=ability.activation_condition,
         allowed_races=[r.name for r in ability.races],
         allowed_professions=[p.name for p in ability.professions],
         character_ids=[c.id for c in ability.characters]
@@ -132,6 +136,8 @@ async def update_ability(ability_id: int, data: AbilityUpdate, db: AsyncSession 
         ability.description = data.description
     if data.cooldown is not None:
         ability.cooldown = data.cooldown
+    if data.activation_condition is not None:
+        ability.activation_condition = data.activation_condition  # ← обновляем условие
 
     # Обновляем связи
     if data.allowed_race_ids is not None:
@@ -154,6 +160,7 @@ async def update_ability(ability_id: int, data: AbilityUpdate, db: AsyncSession 
         name=ability.name,
         description=ability.description,
         cooldown=ability.cooldown,
+        activation_condition=ability.activation_condition,
         allowed_races=[r.name for r in ability.races],
         allowed_professions=[p.name for p in ability.professions],
         character_ids=[c.id for c in ability.characters]

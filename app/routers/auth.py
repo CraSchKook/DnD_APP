@@ -165,7 +165,7 @@ async def telegram_auth(
         logger.info("   — Коммитим изменения")
         await db.commit()
         await db.refresh(player)
-        logger.info("   — Коммит успешно")
+        logger.info("   — Коммит успешен")
     except Exception as e:
         logger.error("❌ Ошибка при сохранении: %s", e)
         await db.rollback()

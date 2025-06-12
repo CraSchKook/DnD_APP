@@ -18,6 +18,7 @@ async def seed_abilities(db: AsyncSession):
             "name": "Rage",
             "description": "Barbarian enters a furious rage, получая бонусы к оружейным атакам и сопротивлению урону.",
             "cooldown": 0.0,
+            "activation_condition": {},
             "allowed_race_names": [],  # доступно всем расам
             "allowed_profession_names": ["Barbarian"]
         },
@@ -25,6 +26,7 @@ async def seed_abilities(db: AsyncSession):
             "name": "Sneak Attack",
             "description": "Rogue наносит дополнительный урон, когда атакует с преимуществом или союзник рядом.",
             "cooldown": 0.0,
+            "activation_condition": {},
             "allowed_race_names": [],
             "allowed_profession_names": ["Rogue"]
         },
@@ -32,6 +34,7 @@ async def seed_abilities(db: AsyncSession):
             "name": "Spellcasting",
             "description": "Permits casting class spells (Wizard/Cleric/Druid/Bard/Warlock/Sorcerer).",
             "cooldown": 0.0,
+            "activation_condition": {},
             "allowed_race_names": [],
             "allowed_profession_names": ["Wizard", "Cleric", "Druid", "Bard", "Warlock", "Sorcerer"]
         },
@@ -39,6 +42,7 @@ async def seed_abilities(db: AsyncSession):
             "name": "Action Surge",
             "description": "Fighter получает дополнительное действие один раз за короткий отдых.",
             "cooldown": 0.0,
+            "activation_condition": {},
             "allowed_race_names": [],
             "allowed_profession_names": ["Fighter"]
         },
@@ -46,6 +50,7 @@ async def seed_abilities(db: AsyncSession):
             "name": "Divine Smite",
             "description": "Paladin тратит ячейку заклинания, чтобы нанести дополнительный святой урон.",
             "cooldown": 0.0,
+            "activation_condition": {},
             "allowed_race_names": [],
             "allowed_profession_names": ["Paladin"]
         },
@@ -53,6 +58,7 @@ async def seed_abilities(db: AsyncSession):
             "name": "Channel Divinity",
             "description": "Cleric получает особую способность, зависящую от выбранного Домена.",
             "cooldown": 0.0,
+            "activation_condition": {},
             "allowed_race_names": [],
             "allowed_profession_names": ["Cleric"]
         },
@@ -60,6 +66,7 @@ async def seed_abilities(db: AsyncSession):
             "name": "Wild Shape",
             "description": "Druid может превращаться в животное дважды в короткий отдых.",
             "cooldown": 0.0,
+            "activation_condition": {},
             "allowed_race_names": [],
             "allowed_profession_names": ["Druid"]
         },
@@ -67,6 +74,7 @@ async def seed_abilities(db: AsyncSession):
             "name": "Bardic Inspiration",
             "description": "Bard дает союзнику кубик вдохновения для бросков искушений или сохранений.",
             "cooldown": 0.0,
+            "activation_condition": {},
             "allowed_race_names": [],
             "allowed_profession_names": ["Bard"]
         },
@@ -74,6 +82,7 @@ async def seed_abilities(db: AsyncSession):
             "name": "Evasion",
             "description": "Rogue или Monk получает половину урона от эффектов, требующих спасбросок Ловкости.",
             "cooldown": 0.0,
+            "activation_condition": {},
             "allowed_race_names": [],
             "allowed_profession_names": ["Rogue", "Monk"]
         },
@@ -81,6 +90,7 @@ async def seed_abilities(db: AsyncSession):
             "name": "Ki Strike",
             "description": "Monk наносит дополнительные удары ки, повышая урон.",
             "cooldown": 0.0,
+            "activation_condition": {},
             "allowed_race_names": [],
             "allowed_profession_names": ["Monk"]
         },
@@ -88,6 +98,7 @@ async def seed_abilities(db: AsyncSession):
             "name": "Second Wind",
             "description": "Fighter восстанавливает немного HP как бонусное действие.",
             "cooldown": 0.0,
+            "activation_condition": {},
             "allowed_race_names": [],
             "allowed_profession_names": ["Fighter"]
         },
@@ -95,6 +106,7 @@ async def seed_abilities(db: AsyncSession):
             "name": "Arcane Recovery",
             "description": "Wizard восстанавливает часть ячеек заклинаний при коротком отдыхе.",
             "cooldown": 0.0,
+            "activation_condition": {},
             "allowed_race_names": [],
             "allowed_profession_names": ["Wizard"]
         },
@@ -102,8 +114,49 @@ async def seed_abilities(db: AsyncSession):
             "name": "УДАР ДУРАКА",
             "description": "ЕСЛИ ТЫ ДУРАК - УДАРЬ КАК ДУРАК",
             "cooldown": 0.0,
+            "activation_condition": {},
             "allowed_race_names": ["Orc", "Gnome"],
             "allowed_profession_names": [] # доступно всем классам
+        },
+        {
+            "name": "Взрыв энергии",
+            "description": "Создаёт мощную волну, наносящую урон всем вокруг.",
+            "cooldown": 60.0,
+            "activation_condition": {"requires_shards": {"red": 1}, "uses_per_long_rest": 2},
+            "allowed_race_names": [],            # ← ОБЯЗАТЕЛЬНО
+            "allowed_profession_names": []       # ← ОБЯЗАТЕЛЬНО
+        },
+        {
+            "name": "Усиленная регенерация",
+            "description": "Увеличивает восстановление HP вдвое на 1 минуту.",
+            "cooldown": 120.0,
+            "activation_condition": {"requires_shards": {"green": 1}, "uses_per_long_rest": 1},
+            "allowed_race_names": [],
+            "allowed_profession_names": []
+        },
+        {
+            "name": "Ускорение времени",
+            "description": "Действия персонажа ускоряются на 10 секунд.",
+            "cooldown": 90.0,
+            "activation_condition": {"requires_shards": {"blue": 1}, "uses_per_long_rest": 2},
+            "allowed_race_names": [],
+            "allowed_profession_names": []
+        },
+        {
+            "name": "Теневой скачок",
+            "description": "Телепорт на 15 метров.",
+            "cooldown": 45.0,
+            "activation_condition": {"requires_shards": {"black": 1}, "uses_per_long_rest": 2, "range_meters": 15},
+            "allowed_race_names": [],
+            "allowed_profession_names": []
+        },
+        {
+            "name": "Призыв чистоты",
+            "description": "Очистка всех негативных эффектов и восстановление 5 HP.",
+            "cooldown": 300.0,
+            "activation_condition": {"requires_shards": {"white": 1}, "uses_per_long_rest": 1},
+            "allowed_race_names": [],
+            "allowed_profession_names": []
         },
     ]
 
@@ -118,7 +171,8 @@ async def seed_abilities(db: AsyncSession):
         ability = Ability(
             name=a["name"],
             description=a["description"],
-            cooldown=a["cooldown"]
+            cooldown=a["cooldown"],
+            activation_condition=a.get("activation_condition")
         )
 
         # Связываем с расами (если указаны по имени)

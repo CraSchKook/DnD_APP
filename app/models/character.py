@@ -1,5 +1,5 @@
 # app/models/character.py
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, JSON
 from sqlalchemy.orm import relationship
 from app.database import Base
 from app.models.ability import character_abilities
@@ -28,13 +28,21 @@ class Character(Base):
 
     # Здесь будут уже ФИНАЛЬНЫЕ ХАРАКТЕРИСТИКИ после применения всех бонусов и распределения:
     hp = Column(Integer, default=10)
-    armor = Column(Integer, default=10)
+    armor = Column(Integer, default=10) # просто есть
     strength = Column(Integer, default=10)
     dexterity = Column(Integer, default=10)
     constitution = Column(Integer, default=10)
     intelligence = Column(Integer, default=10)
     wisdom = Column(Integer, default=10)
     charisma = Column(Integer, default=10)
+
+    shards = Column(JSON, default=lambda: {
+        "red": 0,
+        "green": 0,
+        "blue": 0,
+        "black": 0,
+        "white": 0
+    })
 
     inventory_items = relationship(
         "Inventory", back_populates="character", cascade="all, delete-orphan"

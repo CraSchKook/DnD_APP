@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import Optional, List, Dict, Any
 
 class AbilityBase(BaseModel):
     name: str = Field(..., description="Название способности")
@@ -7,6 +7,7 @@ class AbilityBase(BaseModel):
     cooldown: float = Field(0.0, description="Время перезарядки в секундах")
     #allowed_races: List[str] = Field(default_factory=list, description="Названия рас, которым доступна абилка")
     #allowed_professions: List[str] = Field(default_factory=list, description="Названия классов, которым доступна абилка")
+    activation_condition: Optional[Dict[str, Any]] = Field(None, description="Условия вызова абилки")
 
     model_config = {"from_attributes": True}
 
@@ -42,6 +43,7 @@ class AbilityUpdate(BaseModel):
         description="Список ID персонажей для связи"
     )
 
+    activation_condition: Optional[Dict[str, Any]] = Field(None, description="Новые условия вызова абилки")
     model_config = {"from_attributes": True}
 
 class AbilityRead(AbilityBase):
@@ -50,4 +52,5 @@ class AbilityRead(AbilityBase):
     allowed_professions: List[str] = Field(default_factory=list, description="Названия классов, которым доступна способность")
     character_ids: List[int] = Field(default_factory=list, description="ID персонажей, у которых есть способность")
 
+    activation_condition: Optional[Dict[str, Any]] = Field(None, description="Условия вызова абилки")
     model_config = {"from_attributes": True}

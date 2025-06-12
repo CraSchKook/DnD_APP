@@ -1,5 +1,5 @@
 # app/models/ability.py
-from sqlalchemy import Column, Integer, String, Float, Table, ForeignKey
+from sqlalchemy import Column, Integer, String, Float, Table, ForeignKey, JSON
 from sqlalchemy.orm import relationship
 from app.database import Base
 
@@ -34,6 +34,7 @@ class Ability(Base):
     name = Column(String, nullable=False, unique=True, index=True)
     description = Column(String, default="")
     cooldown = Column(Float, default=0.0)
+    activation_condition = Column(JSON, nullable=True) # условие активации
 
     # Many-to-Many: Character ↔ Ability
     characters = relationship(

@@ -8,8 +8,8 @@ from app.database import get_db
 from app.models.character import Character as CharacterModel
 from app.models.ability import Ability as AbilityModel
 from app.schemas.character import CharacterCreate, CharacterUpdate, CharacterRead
-from app.schemas.inventory import InventoryRead
 from app.models.inventory import Inventory as InventoryModel
+from app.schemas.inventory import InventoryGroup
 
 # Импортируем get_current_user, чтобы «узнавать» player из JWT
 from app.core.auth import get_current_user
@@ -19,9 +19,6 @@ from app.models.player import Player as PlayerModel
 from app.models.race import Race as RaceModel
 from app.models.profession import Profession as ProfessionModel
 from app.models.level import Level as LevelModel
-
-# Импортируем функцию, которая рассчитает финальные статы:
-from app.core.rules import compute_final_stats
 
 # Импортируем функцию, которая определяет роль пользователя Игрок/Мастер:
 from app.core.roles import require_active_as
@@ -57,9 +54,6 @@ async def list_my_characters(
 async def get_character(character_id: int, db: AsyncSession = Depends(get_db)):
     """
     Вернуть одного персонажа по ID вместе с его способностями.
-    (Обратите внимание: здесь потенциально можно добавить проверку,
-    что этот character.player_id == current_user.id, но для простоты —
-    оставим базовый вариант.)
     """
     result = await db.execute(
         select(CharacterModel)
@@ -87,49 +81,26 @@ async def create_character(
     """
     Создать нового персонажа. 
     Логика:
-    1. Проверяем, что race_id, class_id, level_id существуют.
-    2. Проверяем, что new_char.player_id == current_user.id (в Body он не передаёт player_id, 
-       ибо мы его берём из JWT). 
-    3. Расчитываем финальные статы через compute_final_stats:
-       compute_final_stats(race, cls, level, strength_user, dexterity_user, …)
-    4. Сохраняем персонажа с финальными stats.
+    1. Проверяем, что race_id, profession_id, level_id существуют.
+    2. Сохраняем все поля, включая «финальные» статы, которые прислал фронтенд.
     """
-
     # --- Шаг 1: проверка существования Race, Class, Level ---
     result_race = await db.execute(select(RaceModel).where(RaceModel.id == new_char.race_id))
     race_obj = result_race.scalar_one_or_none()
     if not race_obj:
         raise HTTPException(status_code=404, detail="Race not found")
 
-    result_cls = await db.execute(select(ProfessionModel).where(ProfessionModel.id == new_char.profession_id))
-    cls_obj = result_cls.scalar_one_or_none()
-    if not cls_obj:
-        raise HTTPException(status_code=404, detail="Class not found")
+    result_prof = await db.execute(select(ProfessionModel).where(ProfessionModel.id == new_char.profession_id)) # это класс в системе днд
+    prof_obj = result_prof.scalar_one_or_none()
+    if not prof_obj:
+        raise HTTPException(status_code=404, detail="Profession not found")
 
     result_lvl = await db.execute(select(LevelModel).where(LevelModel.id == new_char.level_id))
     lvl_obj = result_lvl.scalar_one_or_none()
     if not lvl_obj:
         raise HTTPException(status_code=404, detail="Level not found")
 
-    # --- Шаг 2: проверка, что player_id совпадает с current_user.id ---
-    # (У вас new_char не содержит player_id, потому что player_id мы берём из JWT)
-    # Однако, если вы вдруг добавили поле player_id в CharacterCreate, можно его игнорировать:
-    # if new_char.player_id != current_user.id:
-    #     raise HTTPException(status_code=403, detail="Cannot create character for another user")
-
-    # --- Шаг 2: вычисление финальных статов ---
-    final_stats = compute_final_stats(
-        race_obj,
-        cls_obj,
-        lvl_obj,
-        strength_user=new_char.strength_user,
-        dexterity_user=new_char.dexterity_user,
-        constitution_user=new_char.constitution_user,
-        intelligence_user=new_char.intelligence_user,
-        wisdom_user=new_char.wisdom_user,
-        charisma_user=new_char.charisma_user
-    )
-
+    # --- Шаг 2: создаём модель с данными из запроса ---
     character = CharacterModel(
         name=new_char.name,
         player_id=None if new_char.is_npc else current_user.id,
@@ -139,14 +110,15 @@ async def create_character(
         level_id=new_char.level_id,
         is_npc=new_char.is_npc,
         avatar_url=new_char.avatar_url,
-        hp=final_stats["hp"],
-        armor=final_stats["armor"],
-        strength=final_stats["strength"],
-        dexterity=final_stats["dexterity"],
-        constitution=final_stats["constitution"],
-        intelligence=final_stats["intelligence"],
-        wisdom=final_stats["wisdom"],
-        charisma=final_stats["charisma"],
+        hp=new_char.hp,
+        armor=new_char.armor,
+        strength=new_char.strength,
+        dexterity=new_char.dexterity,
+        constitution=new_char.constitution,
+        intelligence=new_char.intelligence,
+        wisdom=new_char.wisdom,
+        charisma=new_char.charisma,
+        shards=new_char.shards
     )
 
     # Присваиваем способности, если они пришли:
@@ -160,7 +132,7 @@ async def create_character(
     await db.commit()
     await db.refresh(character)
 
-    # ← Добавляем повторную загрузку с .options(selectinload(...))
+    # Повторная загрузка с .options(selectinload(...))
     result = await db.execute(
         select(CharacterModel)
         .where(CharacterModel.id == character.id)
@@ -172,9 +144,7 @@ async def create_character(
             selectinload(CharacterModel.inventory_items),
         )
     )
-    character = result.scalar_one()
-
-    return character
+    return result.scalar_one()
 
 
 @router.put("/{character_id}", response_model=CharacterRead)
@@ -191,23 +161,16 @@ async def update_character(
     result = await db.execute(
         select(CharacterModel)
         .where(CharacterModel.id == character_id)
-        .options(
-            selectinload(CharacterModel.abilities),
-            selectinload(CharacterModel.race),
-            selectinload(CharacterModel.profession),
-            selectinload(CharacterModel.level),
-            selectinload(CharacterModel.inventory_items),
-        )
+        .options(selectinload(CharacterModel.abilities))
     )
     character = result.scalar_one_or_none()
     if not character:
         raise HTTPException(status_code=404, detail="Character not found")
 
-    # Проверим, что этот character принадлежит текущему пользователю:
     if character.player_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not your character")
 
-    # Обновляем простые поля:
+    # Обновляем поля, переданные в запросе
     update_data = data.dict(exclude_unset=True, exclude={"ability_ids"})
     for field, value in update_data.items():
         setattr(character, field, value)
@@ -220,8 +183,8 @@ async def update_character(
         character.abilities = res.scalars().all()
 
     await db.commit()
-    await db.refresh(character)  
-    
+    await db.refresh(character)
+
     result = await db.execute(
         select(CharacterModel)
         .where(CharacterModel.id == character.id)
@@ -245,9 +208,7 @@ async def delete_character(
     """
     Удалить персонажа, но только если текущий пользователь — его владелец.
     """
-    result = await db.execute(
-        select(CharacterModel).where(CharacterModel.id == character_id)
-    )
+    result = await db.execute(select(CharacterModel).where(CharacterModel.id == character_id))
     character = result.scalar_one_or_none()
     if not character:
         raise HTTPException(status_code=404, detail="Character not found")
@@ -259,29 +220,54 @@ async def delete_character(
     await db.commit()
 
 
-@router.get("/{character_id}/inventory", response_model=List[InventoryRead])
-async def character_inventory(character_id: int, db: AsyncSession = Depends(get_db)):
+@router.get("/{character_id}/inventory", response_model=InventoryGroup)
+async def character_inventory(
+    character_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: PlayerModel = Depends(get_current_user)
+):
     """
-    Вернуть список предметов в инвентаре данного персонажа.
-    (здесь тоже можно добавить проверку владельца персонажа, если нужно)
+    Вернуть инвентарь персонажа в виде:
+    {
+      "id": <character_id>,
+      "character_id": <character_id>,
+      "items": [
+        { "id": <inv_id>, "quantity": <int>, "equipped": <bool>, "item": { … } },
+        …
+      ]
+    }
     """
-    res_char = await db.execute(
-        select(CharacterModel).where(CharacterModel.id == character_id)
-    )
-    char = res_char.scalar_one_or_none()
-    if not char:
+    # Проверка существования персонажа и прав
+    result_char = await db.execute(select(CharacterModel).where(CharacterModel.id == character_id))
+    character = result_char.scalar_one_or_none()
+    if not character:
         raise HTTPException(status_code=404, detail="Character not found")
+    if character.player_id != current_user.id and current_user.active_as != "master":
+        raise HTTPException(status_code=403, detail="Not your character")
 
+    # Грузим записи инвентаря вместе с деталями item
     res_inv = await db.execute(
-        select(InventoryModel).where(InventoryModel.character_id == character_id)
+        select(InventoryModel)
+        .where(InventoryModel.character_id == character_id)
+        .options(selectinload(InventoryModel.item))
     )
-    return res_inv.scalars().all()
+    inv_items = res_inv.scalars().all()
+
+    return InventoryGroup(
+        id=character_id,
+        character_id=character_id,
+        items=inv_items
+    )
+
 
 @router.get("/", response_model=List[CharacterRead])
 async def get_all_characters(
     db: AsyncSession = Depends(get_db),
     current_user: PlayerModel = Depends(require_active_as("master"))
 ):
+    """
+    Вернуть всех персонажей, - доступно мастеру
+    """
     result = await db.execute(
         select(CharacterModel).options(
             selectinload(CharacterModel.race),
@@ -292,6 +278,7 @@ async def get_all_characters(
         )
     )
     return result.scalars().all()
+
 
 @router.get("/available-npcs", response_model=List[CharacterRead])
 async def list_available_npcs(
@@ -353,6 +340,7 @@ async def assign_npc_to_player(
     await db.refresh(character)
 
     return {"detail": f"NPC '{character.name}' теперь принадлежит игроку {player_id}"}
+
 
 @router.post("/{character_id}/unassign", status_code=200)
 async def unassign_character_from_player(

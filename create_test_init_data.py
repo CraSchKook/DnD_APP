@@ -8,7 +8,7 @@ import secrets
 import os
 
 # Подставьте сюда ваш настоящий BOT_TOKEN
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "7458761191:AAHAB3L1_Dx7nMjyHpHquotnjhZi3v1sovY")
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 def generate_init_data(user_info: dict) -> str:
     """
@@ -47,10 +47,10 @@ def generate_init_data(user_info: dict) -> str:
 
 if __name__ == "__main__":
     user = {
-        "id": 7424978915,
-        "first_name": "Дали",
+        "id": 0000000000,
+        "first_name": "Тестовый персонаж",
         "last_name": "",
-        "username": "dddalia",
+        "username": "teeeeeeester",
         "language_code": "ru",
         "allows_write_to_pm": True,
         "photo_url": "https://t.me/i/userpic/320/iaAzb6Eg6MHhJtti8bD-Y8BxdS_AymAi4PQntPpp8dxbdqidqmHbKYYmi1B-GyK3.svg"

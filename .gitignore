@@ -4,6 +4,7 @@
 .env
 *.key
 *.secret
+WEB_dnd/
 
 # Временные файлы Python
 __pycache__/
