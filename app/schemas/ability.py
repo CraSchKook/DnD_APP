@@ -1,13 +1,18 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 
 class AbilityBase(BaseModel):
     name: str = Field(..., description="Название способности")
     description: Optional[str] = Field("", description="Описание")
     cooldown: float = Field(0.0, description="Время перезарядки в секундах")
-    #allowed_races: List[str] = Field(default_factory=list, description="Названия рас, которым доступна абилка")
-    #allowed_professions: List[str] = Field(default_factory=list, description="Названия классов, которым доступна абилка")
-    activation_condition: Optional[Dict[str, Any]] = Field(None, description="Условия вызова абилки")
+    
+    # Условия активации: объект или список объектов
+    activation_condition: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = Field(
+        None, 
+        description=(
+            "Условия вызова абилки, можно передать JSON-объект или массив JSON-объектов, например:"
+            "[{ 'requires_shards': {'white':1} }, { 'uses_per_long_rest':1 }]")
+    )
 
     model_config = {"from_attributes": True}
 
@@ -43,7 +48,7 @@ class AbilityUpdate(BaseModel):
         description="Список ID персонажей для связи"
     )
 
-    activation_condition: Optional[Dict[str, Any]] = Field(None, description="Новые условия вызова абилки")
+    activation_condition: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = Field(None, description="Новые условия вызова абилки")
     model_config = {"from_attributes": True}
 
 class AbilityRead(AbilityBase):
@@ -52,5 +57,5 @@ class AbilityRead(AbilityBase):
     allowed_professions: List[str] = Field(default_factory=list, description="Названия классов, которым доступна способность")
     character_ids: List[int] = Field(default_factory=list, description="ID персонажей, у которых есть способность")
 
-    activation_condition: Optional[Dict[str, Any]] = Field(None, description="Условия вызова абилки")
+    activation_condition: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = Field(None, description="Условия вызова абилки")
     model_config = {"from_attributes": True}

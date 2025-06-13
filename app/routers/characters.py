@@ -150,7 +150,7 @@ async def create_character(
 @router.put("/{character_id}", response_model=CharacterRead)
 async def update_character(
     character_id: int,
-    data: CharacterUpdate,
+    data: CharacterUpdate, # <- сюда прилетит JSON { "abilities": [...] }
     current_user: PlayerModel = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -158,6 +158,7 @@ async def update_character(
     Обновить данные персонажа и его способности, но только если этот персонаж
     действительно принадлежит текущему пользователю.
     """
+    # Загрузить и проверить права…
     result = await db.execute(
         select(CharacterModel)
         .where(CharacterModel.id == character_id)
@@ -175,16 +176,16 @@ async def update_character(
     for field, value in update_data.items():
         setattr(character, field, value)
 
-    # Обновляем способности, если переданы:
+    # Обновляем способности из data.ability_ids (поле JSON называется "abilities"), если переданы:
     if data.ability_ids is not None:
         res = await db.execute(
             select(AbilityModel).where(AbilityModel.id.in_(data.ability_ids))
         )
         character.abilities = res.scalars().all()
+        db.add(character)
 
+    # Сохраняем и возвращаем актуальный объект с подгрузкой связей
     await db.commit()
-    await db.refresh(character)
-
     result = await db.execute(
         select(CharacterModel)
         .where(CharacterModel.id == character.id)

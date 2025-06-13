@@ -64,8 +64,12 @@ class CharacterUpdate(BaseModel):
     profession_id: Optional[int] = Field(None, description="ID класса (из списка /professions)")
     level_id: Optional[int] = Field(None, description="ID уровня (из списка /levels)")
 
-    ability_ids: Optional[List[int]] = Field(default=None, description="Список ID способностей")
-    is_npc: Optional[bool] = Field(default=None, description="Является ли NPC")
+    ability_ids: Optional[List[int]] = Field(
+        None,
+        alias="abilities",
+        description="Список ID способностей",
+    )
+    is_npc: Optional[bool] = Field(None, description="Является ли NPC")
     avatar_url: Optional[str] = Field(None, description="URL аватара персонажа")
 
     shards: Optional[Dict[str, int]] = Field(
