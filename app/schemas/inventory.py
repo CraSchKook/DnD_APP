@@ -17,7 +17,7 @@ class InventoryCreate(InventoryBase):
 class InventoryItemRead(BaseModel):
     id: int = Field(..., description="ID записи в таблице inventory")
     quantity: int = Field(..., description="Количество данного предмета")
-    equipped: bool = Field(..., description="Надето ли предмет")
+    equipped: bool = Field(..., description="Надет ли предмет")
     item: ItemRead = Field(..., description="Детали предмета")
 
     class Config:

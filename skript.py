@@ -3,7 +3,7 @@ import os
 # Укажи путь к папке с проектом
 root_dir = r'F:\Prog_pc\Prog\DnD_app\app'  # ← замени на путь к твоему проекту
 #root_dir = r'F:\Prog_pc\Prog\shadowstar-telegram-mini-app-master'
-output_file = 'project_dump.txt'
+output_file = 'project_dump_x.txt'
 
 with open(output_file, 'w', encoding='utf-8') as out_f:
     for foldername, subfolders, filenames in os.walk(root_dir):
