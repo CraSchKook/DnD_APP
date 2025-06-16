@@ -1,0 +1,3786 @@
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\database.py ===
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker, declarative_base
+
+DATABASE_URL = "sqlite+aiosqlite:///./app.db"
+
+engine = create_async_engine(DATABASE_URL, echo=True)
+
+async_session_maker = sessionmaker(
+    bind=engine,
+    class_=AsyncSession,
+    expire_on_commit=False
+)
+
+Base = declarative_base()
+
+async def get_db():
+    async with async_session_maker() as session:
+        yield session
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\main.py ===
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, WebSocket
+from fastapi.responses import HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+
+from app.database import engine, Base, async_session_maker
+
+# Подключаем все модели, чтобы они попали в metadata
+import app.models.player
+import app.models.session
+import app.models.character
+import app.models.item
+import app.models.ability
+import app.models.map
+import app.models.map_object
+import app.models.effect
+import app.models.event_template
+import app.models.inventory
+import app.models.theme
+
+# Импорт seed-функций
+from app.seed.races import seed_races
+from app.seed.professions import seed_professions
+from app.seed.levels import seed_levels
+from app.seed.abilities import seed_abilities
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    1. Создание всех таблиц (Base.metadata.create_all)
+    2. Заполнение стартовыми данными (races, professions, levels), если их нет
+    3. Запуск FastAPI
+    """
+    print("→ Создаю таблицы...")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    print("✔ Таблицы созданы.")
+
+    async with async_session_maker() as db:
+        await seed_races(db)
+        await seed_professions(db)
+        await seed_levels(db)
+        await seed_abilities(db)
+    print("✔ Seed-данные загружены.")
+    yield
+
+app = FastAPI(lifespan=lifespan)
+
+# Разрешение адресов для запросов
+origins = [
+    "http://localhost:5173", # локальный сервер дев
+    "http://localhost:4173/", # локальный сервер билда
+    "https://mini.shadstar.ru",
+    "https://t.me/Shadowstar_master_bot"
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins, # разрешенные адреса
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Монтируем каталог 'static' на URL '/static'
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
+
+# --- Подключение всех роутеров ---
+from app.routers.auth import router as auth_router
+from app.routers.players import router as players_router
+from app.routers.sessions import router as sessions_router
+from app.routers.races import router as races_router
+from app.routers.profession import router as professions_router
+from app.routers.levels import router as levels_router
+from app.routers.characters import router as characters_router
+from app.routers.items import router as items_router
+from app.routers.abilities import router as abilities_router
+from app.routers.maps import router as maps_router
+from app.routers.map_objects import router as map_objects_router
+from app.routers.effects import router as effects_router
+from app.routers.event_templates import router as event_templates_router
+from app.routers.inventory import router as inventory_router
+from app.routers.event_instance import router as event_instance_router
+from app.routers.theme import router as theme_router
+
+app.include_router(auth_router)
+app.include_router(players_router)
+app.include_router(sessions_router)
+app.include_router(races_router)
+app.include_router(professions_router)
+app.include_router(levels_router)
+app.include_router(characters_router)
+app.include_router(items_router)
+app.include_router(abilities_router)
+app.include_router(maps_router)
+app.include_router(map_objects_router)
+app.include_router(effects_router)
+app.include_router(event_templates_router)
+app.include_router(inventory_router)
+app.include_router(event_instance_router)
+app.include_router(theme_router)
+
+
+# --- Web-интерфейс (страница с WebSocket) ---
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    return """
+    <html>
+        <head><title>D&D App</title></head>
+        <body>
+            <h1>Привет! Это D&D приложение</h1>
+            <button onclick="sendMessage()">Отправить сообщение на сервер</button>
+            <div id="messages"></div>
+            <script>
+                const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + "/ws");
+                ws.onmessage = function(event) {
+                    const messages = document.getElementById('messages');
+                    const message = document.createElement('div');
+                    message.textContent = 'Новое сообщение: ' + event.data;
+                    messages.appendChild(message);
+                };
+                function sendMessage() {
+                    ws.send("Привет серверу!");
+                }
+            </script>
+        </body>
+    </html>
+    """
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """
+    Простое WebSocket-соединение, принимает и отправляет текст.
+    """
+    await websocket.accept()
+    while True:
+        data = await websocket.receive_text()
+        await websocket.send_text(f"Сообщение получено: {data}")
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\__init__.py ===
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\core\auth.py ===
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from jose import jwt, JWTError
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+from app.database import get_db
+from app.models.player import Player as PlayerModel
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+JWT_SECRET = "a1890eb396e2d48d530ef0071345a5f7567819895e7e44871885b2357e56bb6d" #os.getenv("JWT_SECRET") 
+JWT_ALGORITHM = "HS256"
+
+oauth2_scheme = HTTPBearer(bearerFormat="JWT")
+
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(oauth2_scheme),
+    db: AsyncSession = Depends(get_db)
+) -> PlayerModel:
+    """
+    1) Забирает токен из заголовка Authorization: Bearer <token>
+    2) Расшифровывает (jwt.decode); если не прошёл — кидает HTTPException(403)
+    3) Берёт из payload['sub'] = user_id
+    4) Вытягивает из БД PlayerModel по этому ID; если нет — 404
+    5) Возвращает объект PlayerModel (SQLAlchemy) — «текущий пользователь»
+    """
+    token = credentials.credentials  # строка токена без "Bearer "
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id_str: str = payload.get("sub")
+        if user_id_str is None:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Could not validate credentials")
+        user_id = int(user_id_str)
+    except (JWTError, ValueError):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Could not validate credentials")
+
+    result = await db.execute(select(PlayerModel).where(PlayerModel.id == user_id))
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    return user
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\core\roles.py ===
+from fastapi import Depends, HTTPException, status
+from app.core.auth import get_current_user
+from app.models.player import Player
+
+def require_active_as(expected: str):
+    """
+    Проверка: пользователь действует в нужной роли (player/master).
+    Например: active_as == 'master'
+    """
+    async def checker(current_user: Player = Depends(get_current_user)):
+        if current_user.active_as != expected:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"You are acting as '{current_user.active_as}', but '{expected}' is required"
+            )
+        return current_user
+    return checker
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\core\rules.py ===
+from typing import Dict
+from app.models.race import Race
+from app.models.profession import Profession
+from app.models.level import Level
+
+def compute_final_stats(
+    race: Race,
+    cls: Profession,
+    lvl: Level,
+    strength_user: int,
+    dexterity_user: int,
+    constitution_user: int,
+    intelligence_user: int,
+    wisdom_user: int,
+    charisma_user: int
+) -> Dict[str, int]:
+    """
+    Рассчитывает финальные статы персонажа с учётом:
+    1. «Сырого» ввода игрока (strength_user, dexterity_user и т.д.).
+    2. Бонусов/штрафов расы (race.*_bonus).
+    3. Бонусов/штрафов класса (cls.*_bonus).
+    4. Базового HP на 1-м уровне (hit_die) + расовый бонус (race.extra_hp * lvl.id) + модификатор CON.
+    5. AC (Armor Class) = 8 + модификатор DEX.
+    """
+
+    # 1. Начальные «сырые» статы (до бонусов расы/класса)
+    base = {
+        "strength": strength_user,
+        "dexterity": dexterity_user,
+        "constitution": constitution_user,
+        "intelligence": intelligence_user,
+        "wisdom": wisdom_user,
+        "charisma": charisma_user,
+    }
+
+    # 2. Применяем бонусы/штрафы расы к базовым статам
+    base["strength"]     += race.strength_bonus
+    base["dexterity"]    += race.dexterity_bonus
+    base["constitution"] += race.constitution_bonus
+    base["intelligence"] += race.intelligence_bonus
+    base["wisdom"]       += race.wisdom_bonus
+    base["charisma"]     += race.charisma_bonus
+
+    # 3. Применяем бонусы/штрафы класса (профессии) к базовым статам
+    base["strength"]     += cls.strength_bonus
+    base["dexterity"]    += cls.dexterity_bonus
+    base["constitution"] += cls.constitution_bonus
+    base["intelligence"] += cls.intelligence_bonus
+    base["wisdom"]       += cls.wisdom_bonus
+    base["charisma"]     += cls.charisma_bonus
+
+    # 4. Вычисляем модификаторы: (stat - 10) // 2
+    def ability_modifier(stat_value: int) -> int:
+        return (stat_value - 10) // 2
+
+    mods = {stat: ability_modifier(val) for stat, val in base.items()}
+
+    # 5. Рассчитываем HP:
+    #    hit_die (например, 8) + модификатор CON + (lvl.id * race.extra_hp)
+    #    lvl.id — номер уровня (1, 2, 3 и т.д.), race.extra_hp — бонус HP от расы на каждый уровень
+    hp_total = cls.hit_die + mods["constitution"] + lvl.id * race.extra_hp
+
+    # 6. Рассчитываем Armor Class (AC):
+    #    Базовая формула: 8 + модификатор DEX
+    armor = 8 + mods["dexterity"]
+
+    # 7. Если lvl.bonus_attribute указан, повышаем соответствующий атрибут на +1 (не влияет на HP здесь)
+    if lvl.bonus_attribute:
+        stat_name = lvl.bonus_attribute.lower()
+        if stat_name in base:
+            base[stat_name] += 1
+            mods[stat_name] = ability_modifier(base[stat_name])
+
+    # 8. Составляем итоговый словарь с финальными статами
+    final = {
+        "hp": hp_total,
+        "armor": armor,
+        "strength": base["strength"],
+        "dexterity": base["dexterity"],
+        "constitution": base["constitution"],
+        "intelligence": base["intelligence"],
+        "wisdom": base["wisdom"],
+        "charisma": base["charisma"],
+    }
+    return final
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\dependencies\ability_db.py ===
+from typing import List
+from fastapi import HTTPException
+from app.schemas.ability import Ability
+
+class FakeAbilityDatabase:
+    """In-memory хранилище способностей."""
+    def __init__(self):
+        self._abilities: List[Ability] = []
+
+    def list_abilities(self) -> List[Ability]:
+        return self._abilities
+
+    def get_ability(self, ability_id: int) -> Ability:
+        for a in self._abilities:
+            if a.id == ability_id:
+                return a
+        raise HTTPException(status_code=404, detail="Ability not found")
+
+    def create_ability(self, ability: Ability) -> Ability:
+        if any(a.id == ability.id for a in self._abilities):
+            raise HTTPException(status_code=400, detail="Ability with this ID already exists")
+        self._abilities.append(ability)
+        return ability
+
+    def update_ability(self, ability_id: int, updated: Ability) -> Ability:
+        for idx, a in enumerate(self._abilities):
+            if a.id == ability_id:
+                self._abilities[idx] = updated
+                return updated
+        raise HTTPException(status_code=404, detail="Ability not found")
+
+    def delete_ability(self, ability_id: int) -> None:
+        for idx, a in enumerate(self._abilities):
+            if a.id == ability_id:
+                self._abilities.pop(idx)
+                return
+        raise HTTPException(status_code=404, detail="Ability not found")
+
+fake_ability_db = FakeAbilityDatabase()
+
+def get_ability_db() -> FakeAbilityDatabase:
+    """Dependency для работы со способностями."""
+    return fake_ability_db
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\dependencies\character_db.py ===
+from typing import List
+from fastapi import HTTPException
+from app.schemas.character import Character
+
+class FakeCharacterDatabase:
+    """In-memory хранилище персонажей."""
+    def __init__(self):
+        self._characters: List[Character] = []
+
+    def list_characters(self) -> List[Character]:
+        return self._characters
+
+    def get_character(self, character_id: int) -> Character:
+        for c in self._characters:
+            if c.id == character_id:
+                return c
+        raise HTTPException(status_code=404, detail="Character not found")
+
+    def create_character(self, character: Character) -> Character:
+        if any(c.id == character.id for c in self._characters):
+            raise HTTPException(status_code=400, detail="ID already exists")
+        self._characters.append(character)
+        return character
+
+    def update_character(self, character_id: int, updated: Character) -> Character:
+        for idx, c in enumerate(self._characters):
+            if c.id == character_id:
+                self._characters[idx] = updated
+                return updated
+        raise HTTPException(status_code=404, detail="Character not found")
+
+    def delete_character(self, character_id: int) -> None:
+        for idx, c in enumerate(self._characters):
+            if c.id == character_id:
+                self._characters.pop(idx)
+                return
+        raise HTTPException(status_code=404, detail="Character not found")
+
+fake_character_db = FakeCharacterDatabase()
+
+def get_character_db() -> FakeCharacterDatabase:
+    """Dependency для работы с персонажами."""
+    return fake_character_db
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\dependencies\db.py ===
+from typing import List
+from fastapi import HTTPException
+
+from app.schemas.event_instance import EventInstance
+from app.models.theme import Theme as ThemeModel
+
+class FakeDatabase:
+    """
+    Простейшая in-memory «база» для тем и для инстансов событий.
+    """
+
+    def __init__(self):
+        # Список Pydantic-моделей EventInstance (из app/schemas/event_instance.py)
+        self.event_instances: List[EventInstance] = []
+        # Список SQLAlchemy-моделей ThemeModel (из app/models/theme.py)
+        self.themes: List[ThemeModel] = []
+
+    # ------------- Theme Methods -------------
+    def list_themes(self) -> List[ThemeModel]:
+        return self.themes
+
+    def create_theme(self, theme: ThemeModel) -> ThemeModel:
+        self.themes.append(theme)
+        return theme
+
+    # ------------- EventInstance Methods -------------
+    def list_event_instances(self) -> List[EventInstance]:
+        return self.event_instances
+
+    def create_event_instance(self, event_instance: EventInstance) -> EventInstance:
+        self.event_instances.append(event_instance)
+        return event_instance
+
+# Единый экземпляр «фейковой» базы
+fake_db = FakeDatabase()
+
+# Функция-зависимость для FastAPI (для роутеров event_instance и theme)
+def get_db() -> FakeDatabase:
+    return fake_db
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\dependencies\effect_db.py ===
+from typing import List
+from fastapi import HTTPException
+from app.schemas.effect import Effect
+from app.schemas.event_instance import EventInstance
+
+class FakeEffectDatabase:
+    """In-memory хранилище эффектов."""
+    def __init__(self):
+        self._effects: List[Effect] = []
+
+    def list_effects(self) -> List[Effect]:
+        return self._effects
+
+    def get_effect(self, effect_id: int) -> Effect:
+        for e in self._effects:
+            if e.id == effect_id:
+                return e
+        raise HTTPException(status_code=404, detail="Effect not found")
+
+    def create_effect(self, effect: Effect) -> Effect:
+        if any(e.id == effect.id for e in self._effects):
+            raise HTTPException(status_code=400, detail="Effect with this ID already exists")
+        self._effects.append(effect)
+        return effect
+
+    def update_effect(self, effect_id: int, updated: Effect) -> Effect:
+        for idx, e in enumerate(self._effects):
+            if e.id == effect_id:
+                self._effects[idx] = updated
+                return updated
+        raise HTTPException(status_code=404, detail="Effect not found")
+
+    def delete_effect(self, effect_id: int) -> None:
+        for idx, e in enumerate(self._effects):
+            if e.id == effect_id:
+                self._effects.pop(idx)
+                return
+        raise HTTPException(status_code=404, detail="Effect not found")
+
+fake_effect_db = FakeEffectDatabase()
+
+def get_effect_db() -> FakeEffectDatabase:
+    """Dependency для работы с эффектами."""
+    return fake_effect_db
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\dependencies\event_template_db.py ===
+from typing import List
+from fastapi import HTTPException
+from app.schemas.event_template import EventTemplate
+
+class FakeEventTemplateDatabase:
+    """In-memory хранилище шаблонов событий."""
+    def __init__(self):
+        self._templates: List[EventTemplate] = []
+
+    def list_templates(self) -> List[EventTemplate]:
+        return self._templates
+
+    def get_template(self, template_id: int) -> EventTemplate:
+        for t in self._templates:
+            if t.id == template_id:
+                return t
+        raise HTTPException(status_code=404, detail="EventTemplate not found")
+
+    def create_template(self, template: EventTemplate) -> EventTemplate:
+        if any(t.id == template.id for t in self._templates):
+            raise HTTPException(status_code=400, detail="Template with this ID already exists")
+        self._templates.append(template)
+        return template
+
+    def update_template(self, template_id: int, updated: EventTemplate) -> EventTemplate:
+        for idx, t in enumerate(self._templates):
+            if t.id == template_id:
+                self._templates[idx] = updated
+                return updated
+        raise HTTPException(status_code=404, detail="EventTemplate not found")
+
+    def delete_template(self, template_id: int) -> None:
+        for idx, t in enumerate(self._templates):
+            if t.id == template_id:
+                self._templates.pop(idx)
+                return
+        raise HTTPException(status_code=404, detail="EventTemplate not found")
+
+fake_event_template_db = FakeEventTemplateDatabase()
+
+def get_event_template_db() -> FakeEventTemplateDatabase:
+    """Dependency для работы с шаблонами событий."""
+    return fake_event_template_db
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\dependencies\item_db.py ===
+from typing import List
+from fastapi import HTTPException
+from app.schemas.item import Item
+
+class FakeItemDatabase:
+    """In-memory хранилище предметов."""
+    def __init__(self):
+        self._items: List[Item] = []
+
+    def list_items(self) -> List[Item]:
+        return self._items
+
+    def get_item(self, item_id: int) -> Item:
+        for i in self._items:
+            if i.id == item_id:
+                return i
+        raise HTTPException(status_code=404, detail="Item not found")
+
+    def create_item(self, item: Item) -> Item:
+        if any(i.id == item.id for i in self._items):
+            raise HTTPException(status_code=400, detail="Item with this ID already exists")
+        self._items.append(item)
+        return item
+
+    def update_item(self, item_id: int, updated: Item) -> Item:
+        for idx, i in enumerate(self._items):
+            if i.id == item_id:
+                self._items[idx] = updated
+                return updated
+        raise HTTPException(status_code=404, detail="Item not found")
+
+    def delete_item(self, item_id: int) -> None:
+        for idx, i in enumerate(self._items):
+            if i.id == item_id:
+                self._items.pop(idx)
+                return
+        raise HTTPException(status_code=404, detail="Item not found")
+
+fake_item_db = FakeItemDatabase()
+
+def get_item_db() -> FakeItemDatabase:
+    """Dependency для работы с предметами."""
+    return fake_item_db
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\dependencies\map_db.py ===
+from typing import List
+from fastapi import HTTPException
+from app.schemas.map import Map
+
+class FakeMapDatabase:
+    """In-memory хранилище карт."""
+    def __init__(self):
+        self._maps: List[Map] = []
+
+    def list_maps(self) -> List[Map]:
+        return self._maps
+
+    def get_map(self, map_id: int) -> Map:
+        for m in self._maps:
+            if m.id == map_id:
+                return m
+        raise HTTPException(status_code=404, detail="Map not found")
+
+    def create_map(self, map_obj: Map) -> Map:
+        if any(m.id == map_obj.id for m in self._maps):
+            raise HTTPException(status_code=400, detail="Map with this ID already exists")
+        self._maps.append(map_obj)
+        return map_obj
+
+    def update_map(self, map_id: int, updated: Map) -> Map:
+        for idx, m in enumerate(self._maps):
+            if m.id == map_id:
+                self._maps[idx] = updated
+                return updated
+        raise HTTPException(status_code=404, detail="Map not found")
+
+    def delete_map(self, map_id: int) -> None:
+        for idx, m in enumerate(self._maps):
+            if m.id == map_id:
+                self._maps.pop(idx)
+                return
+        raise HTTPException(status_code=404, detail="Map not found")
+
+fake_map_db = FakeMapDatabase()
+
+def get_map_db() -> FakeMapDatabase:
+    """Dependency для работы с картами."""
+    return fake_map_db
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\dependencies\map_object_db.py ===
+from typing import List
+from fastapi import HTTPException
+from app.schemas.map_object import MapObject
+
+class FakeMapObjectDatabase:
+    """In-memory хранилище объектов карты."""
+    def __init__(self):
+        self._objects: List[MapObject] = []
+
+    def list_objects(self) -> List[MapObject]:
+        return self._objects
+
+    def get_object(self, object_id: int) -> MapObject:
+        for obj in self._objects:
+            if obj.id == object_id:
+                return obj
+        raise HTTPException(status_code=404, detail="MapObject not found")
+
+    def create_object(self, obj: MapObject) -> MapObject:
+        if any(o.id == obj.id for o in self._objects):
+            raise HTTPException(status_code=400, detail="Object with this ID already exists")
+        self._objects.append(obj)
+        return obj
+
+    def update_object(self, object_id: int, updated: MapObject) -> MapObject:
+        for idx, o in enumerate(self._objects):
+            if o.id == object_id:
+                self._objects[idx] = updated
+                return updated
+        raise HTTPException(status_code=404, detail="MapObject not found")
+
+    def delete_object(self, object_id: int) -> None:
+        for idx, o in enumerate(self._objects):
+            if o.id == object_id:
+                self._objects.pop(idx)
+                return
+        raise HTTPException(status_code=404, detail="MapObject not found")
+
+fake_map_object_db = FakeMapObjectDatabase()
+
+def get_map_object_db() -> FakeMapObjectDatabase:
+    """Dependency для работы с объектами карты."""
+    return fake_map_object_db
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\dependencies\npc_db.py ===
+from typing import List
+from fastapi import HTTPException
+from app.schemas.npc import NPC
+
+class FakeNPCDatabase:
+    """In-memory хранилище NPC."""
+    def __init__(self):
+        self._npcs: List[NPC] = []
+
+    def list_npcs(self) -> List[NPC]:
+        return self._npcs
+
+    def get_npc(self, npc_id: int) -> NPC:
+        for npc in self._npcs:
+            if npc.id == npc_id:
+                return npc
+        raise HTTPException(status_code=404, detail="NPC not found")
+
+    def create_npc(self, npc: NPC) -> NPC:
+        if any(n.id == npc.id for n in self._npcs):
+            raise HTTPException(status_code=400, detail="NPC with this ID already exists")
+        self._npcs.append(npc)
+        return npc
+
+    def update_npc(self, npc_id: int, updated: NPC) -> NPC:
+        for idx, npc in enumerate(self._npcs):
+            if npc.id == npc_id:
+                self._npcs[idx] = updated
+                return updated
+        raise HTTPException(status_code=404, detail="NPC not found")
+
+    def delete_npc(self, npc_id: int) -> None:
+        for idx, npc in enumerate(self._npcs):
+            if npc.id == npc_id:
+                self._npcs.pop(idx)
+                return
+        raise HTTPException(status_code=404, detail="NPC not found")
+
+fake_npc_db = FakeNPCDatabase()
+
+def get_npc_db() -> FakeNPCDatabase:
+    """Dependency для работы с NPC."""
+    return fake_npc_db
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\dependencies\session_db.py ===
+from typing import List
+from fastapi import HTTPException
+from app.schemas.session import Session
+from datetime import datetime
+
+class FakeSessionDatabase:
+    """In-memory хранилище сессий."""
+    def __init__(self):
+        self._sessions: List[Session] = []
+
+    def list_sessions(self) -> List[Session]:
+        return self._sessions
+
+    def get_session(self, session_id: int) -> Session:
+        for s in self._sessions:
+            if s.id == session_id:
+                return s
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    def create_session(self, session: Session) -> Session:
+        if any(s.id == session.id for s in self._sessions):
+            raise HTTPException(status_code=400, detail="Session with this ID already exists")
+        self._sessions.append(session)
+        return session
+
+    def update_session(self, session_id: int, updated: Session) -> Session:
+        for idx, s in enumerate(self._sessions):
+            if s.id == session_id:
+                self._sessions[idx] = updated
+                return updated
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    def delete_session(self, session_id: int) -> None:
+        for idx, s in enumerate(self._sessions):
+            if s.id == session_id:
+                self._sessions.pop(idx)
+                return
+        raise HTTPException(status_code=404, detail="Session not found")
+
+# единый экземпляр
+fake_session_db = FakeSessionDatabase()
+
+# зависимость
+def get_session_db() -> FakeSessionDatabase:
+    return fake_session_db
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\models\ability.py ===
+# app/models/ability.py
+from sqlalchemy import Column, Integer, String, Float, Table, ForeignKey, JSON
+from sqlalchemy.orm import relationship
+from app.database import Base
+
+# Association tables for many-to-many relationships
+character_abilities = Table(
+    'character_abilities',
+    Base.metadata,
+    Column('character_id', ForeignKey('characters.id', ondelete='CASCADE'), primary_key=True),
+    Column('ability_id', ForeignKey('abilities.id', ondelete='CASCADE'), primary_key=True),
+)
+
+# Новая таблица: Race ↔ Ability
+race_abilities = Table(
+    'race_abilities',
+    Base.metadata,
+    Column('race_id', ForeignKey('races.id', ondelete='CASCADE'), primary_key=True),
+    Column('ability_id', ForeignKey('abilities.id', ondelete='CASCADE'), primary_key=True),
+)
+
+# Новая таблица: Profession ↔ Ability
+profession_abilities = Table(
+    'profession_abilities',
+    Base.metadata,
+    Column('profession_id', ForeignKey('professions.id', ondelete='CASCADE'), primary_key=True),
+    Column('ability_id', ForeignKey('abilities.id', ondelete='CASCADE'), primary_key=True),
+)
+
+class Ability(Base):
+    __tablename__ = "abilities"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False, unique=True, index=True)
+    description = Column(String, default="")
+    cooldown = Column(Float, default=0.0)
+    activation_condition = Column(JSON, nullable=True) # условие активации
+
+    # Many-to-Many: Character ↔ Ability
+    characters = relationship(
+        "Character",
+        secondary=character_abilities,
+        back_populates="abilities",
+        cascade="all, delete"
+    )
+
+    # Many-to-Many: Race ↔ Ability (теперь можем проверять расовые ограничения)
+    races = relationship(
+        "Race",
+        secondary=race_abilities,
+        back_populates="abilities"
+    )
+
+    # Many-to-Many: Profession ↔ Ability (для классовых ограничений)
+    professions = relationship(
+        "Profession",
+        secondary=profession_abilities,
+        back_populates="abilities"
+    )
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\models\character.py ===
+# app/models/character.py
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, JSON
+from sqlalchemy.orm import relationship
+from app.database import Base
+from app.models.ability import character_abilities
+
+class Character(Base):
+    __tablename__ = "characters"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+
+    is_npc = Column(Boolean, default=False, nullable=False)  # NPC или нет
+
+    player_id = Column(Integer, ForeignKey("players.id"), nullable=True)  # может быть null у NPC
+    session_id = Column(Integer, ForeignKey("sessions.id"), nullable=True)
+
+    race_id = Column(Integer, ForeignKey("races.id"), nullable=False)
+    race = relationship("Race", back_populates="characters")
+
+    profession_id = Column(Integer, ForeignKey("professions.id")) # НА САМОМ ДЕЛЕ ЭТО КЛАСС
+    profession = relationship("Profession", back_populates="characters") # НА САМОМ ДЕЛЕ ЭТО КЛАСС
+
+    level_id = Column(Integer, ForeignKey("levels.id"), nullable=False)
+    level = relationship("Level", back_populates="characters")
+
+    avatar_url = Column(String, nullable=True)  # новое поле
+
+    # Здесь будут уже ФИНАЛЬНЫЕ ХАРАКТЕРИСТИКИ после применения всех бонусов и распределения:
+    hp = Column(Integer, default=10)
+    armor = Column(Integer, default=10) # просто есть
+    strength = Column(Integer, default=10)
+    dexterity = Column(Integer, default=10)
+    constitution = Column(Integer, default=10)
+    intelligence = Column(Integer, default=10)
+    wisdom = Column(Integer, default=10)
+    charisma = Column(Integer, default=10)
+
+    shards = Column(JSON, default=lambda: {
+        "red": 0,
+        "green": 0,
+        "blue": 0,
+        "black": 0,
+        "white": 0
+    })
+
+    inventory_items = relationship(
+        "Inventory", back_populates="character", cascade="all, delete-orphan"
+    )
+
+    abilities = relationship(
+        "Ability",
+        secondary=character_abilities,
+        back_populates="characters"
+    )
+
+    player = relationship("Player", back_populates="characters")
+    session = relationship("Session", back_populates="characters")
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\models\effect.py ===
+from sqlalchemy import Column, Integer, String, Float
+from sqlalchemy.orm import relationship, foreign
+from app.database import Base
+from app.models.character import Character
+
+class Effect(Base):
+    __tablename__ = "effects"
+
+    id          = Column(Integer, primary_key=True, index=True)
+    target_type = Column(String, nullable=False)       # "character" или "session"
+    target_id   = Column(Integer, nullable=False)      # ID цели
+    name        = Column(String, nullable=False)
+    duration    = Column(Float, default=0.0)           # длительность в секундах
+
+    # Связь с персонажем (если target_type=="character")
+    character = relationship(
+        Character,
+        primaryjoin="and_(Effect.target_type=='character', foreign(Effect.target_id)==Character.id)",
+        viewonly=True,
+    )
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\models\event_template.py ===
+from sqlalchemy import Column, Integer, String, JSON
+from app.database import Base
+
+class EventTemplate(Base):
+    __tablename__ = "event_templates"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    description = Column(String, nullable=True)
+    parameters = Column(JSON, nullable=True)  # произвольные данные шаблона
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\models\inventory.py ===
+# app/models/inventory.py
+from sqlalchemy import Column, Integer, Boolean, ForeignKey
+from sqlalchemy.orm import relationship
+from app.database import Base
+
+class Inventory(Base):
+    __tablename__ = "inventory"
+
+    id = Column(Integer, primary_key=True, index=True)
+    character_id = Column(Integer, ForeignKey("characters.id", ondelete='CASCADE'), nullable=True)
+    item_id = Column(Integer, ForeignKey("items.id", ondelete='CASCADE'), nullable=False)
+    quantity = Column(Integer, default=1)
+    equipped = Column(Boolean, default=False)
+
+    # Отношения
+    character = relationship("Character", back_populates="inventory_items")
+    item = relationship("Item")
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\models\item.py ===
+from sqlalchemy import Column, Integer, String, Float, JSON
+from app.database import Base
+
+class Item(Base):
+    __tablename__ = "items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    description = Column(String, default="")
+    weight = Column(Float, default=0.0)
+    properties = Column(JSON, default={})  
+    # Пример properties: {"damage": "1d8", "type": "melee"}
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\models\level.py ===
+from sqlalchemy import Column, Integer, String
+from sqlalchemy.orm import relationship
+from app.database import Base
+
+class Level(Base):
+    __tablename__ = "levels"
+
+    id = Column(Integer, primary_key=True, index=True)  
+    # Здесь id = номер уровня (1, 2, 3 и т. д.)
+
+    # Описание того, что даёт этот уровень:
+    hp_increase = Column(Integer, default=5, nullable=False)
+    bonus_attribute = Column(String, default="None", nullable=True)
+    description = Column(String, default="", nullable=True)
+
+    # Можно хранить отношение к персонажам, но необязательно
+    characters = relationship("Character", back_populates="level")
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\models\map.py ===
+from sqlalchemy import Column, Integer, String, ForeignKey
+from sqlalchemy.orm import relationship
+from app.database import Base
+
+class Map(Base):
+    __tablename__ = "maps"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    image_url = Column(String, nullable=False)
+
+    objects = relationship("MapObject", back_populates="map", cascade="all, delete")
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\models\map_object.py ===
+from sqlalchemy import Column, Integer, String, ForeignKey, JSON
+from sqlalchemy.orm import relationship
+from app.database import Base
+
+class MapObject(Base):
+    __tablename__ = "map_objects"
+
+    id = Column(Integer, primary_key=True, index=True)
+    map_id = Column(Integer, ForeignKey("maps.id"), nullable=False)
+    name = Column(String, nullable=False)
+    type = Column(String, nullable=False)  # Например: "trap", "npc", "item"
+    position = Column(JSON, nullable=False)  # {'x': 120, 'y': 340}
+    properties = Column(JSON, nullable=True)  # Любые доп. данные
+
+    map = relationship("Map", back_populates="objects")
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\models\player.py ===
+from sqlalchemy import Column, Integer, String
+from sqlalchemy.orm import relationship
+from app.database import Base
+
+class Player(Base):
+    __tablename__ = "players"
+
+    id = Column(Integer, primary_key=True, index=True)
+    telegram_id = Column(Integer, unique=True, index=True, nullable=False)
+    name = Column(String, nullable=False)
+    username = Column(String, nullable=True)
+    
+    role = Column(String, default="player", nullable=False)  # может ли быть мастером
+    active_as = Column(String, default="player", nullable=False)  # сейчас играет как кто
+
+    characters = relationship("Character", back_populates="player", cascade="all, delete-orphan")
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\models\profession.py ===
+from sqlalchemy import Column, Integer, String
+from sqlalchemy.orm import relationship
+from app.database import Base
+
+class Profession(Base):
+    __tablename__ = "professions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, unique=True, index=True, nullable=False)
+
+    hit_die = Column(Integer, default=8)
+
+    strength_bonus = Column(Integer, default=0)
+    dexterity_bonus = Column(Integer, default=0)
+    constitution_bonus = Column(Integer, default=0)
+    intelligence_bonus = Column(Integer, default=0)
+    wisdom_bonus = Column(Integer, default=0)
+    charisma_bonus = Column(Integer, default=0)
+
+    # Существующая связь к персонажам
+    characters = relationship("Character", back_populates="profession")
+
+    # Новое поле: какие способности доступны этому классу
+    abilities = relationship(
+        "Ability",
+        secondary="profession_abilities",
+        back_populates="professions"
+    )
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\models\race.py ===
+from sqlalchemy import Column, Integer, String, Boolean, JSON
+from sqlalchemy.orm import relationship
+from app.database import Base
+
+class Race(Base):
+    __tablename__ = "races"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, unique=True, index=True, nullable=False)
+
+    # --------------- Существующие бонусы/штрафы ---------------
+    strength_bonus = Column(Integer, default=0)
+    dexterity_bonus = Column(Integer, default=0)
+    constitution_bonus = Column(Integer, default=0)
+    intelligence_bonus = Column(Integer, default=0)
+    wisdom_bonus = Column(Integer, default=0)
+    charisma_bonus = Column(Integer, default=0)
+
+    # --------------- Новые поля для расширенной логики ---------------
+    extra_hp = Column(Integer, default=2)
+    movement_speed = Column(Integer, default=30)  # скорость перемещения (в футах)
+    night_vision = Column(Boolean, default=False)  # ночное зрение
+    resistances = Column(JSON, default=list)  # устойчивости к типам урона/эффектов, пример: ["fire", "cold"]
+    languages = Column(JSON, default=list)    # известные языки, пример: ["Common", "Elvish"]
+    traits = Column(JSON, default=list)       # уникальные черты (пассивки), пример: ["Lucky", "Brave"]
+
+    # Связь с персонажами (обратно из Character.model)
+    characters = relationship("Character", back_populates="race")
+
+    # Новое поле: какие способности доступны этой расе
+    abilities = relationship(
+        "Ability",
+        secondary="race_abilities",   # строка-имя таблицы
+        back_populates="races"
+    )
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\models\session.py ===
+from sqlalchemy import Column, Integer, String, DateTime, func
+from sqlalchemy.orm import relationship
+from app.database import Base
+
+class Session(Base):
+    __tablename__ = "sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    description = Column(String, default="")
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    characters = relationship("Character", back_populates="session", cascade="all, delete-orphan")
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\models\theme.py ===
+from pydantic import BaseModel
+from typing import Dict
+
+class Theme(BaseModel):
+    id: int
+    name: str
+    colors: Dict[str, str]  # Пример: {"background": "#000000", "text": "#FFFFFF"}
+    icons_path: str  # Пример: "/static/icons/dark_theme/"
+    map_filters: Dict[str, str]  # Пример: {"fog": "enabled", "light": "dim"}
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\routers\abilities.py ===
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+from sqlalchemy.orm import selectinload
+
+from app.database import get_db
+from app.models.ability import Ability as AbilityModel
+from app.models.character import Character as CharacterModel
+from app.models.race import Race as RaceModel
+from app.models.profession import Profession as ProfessionModel
+from app.schemas.ability import AbilityCreate, AbilityRead, AbilityUpdate
+
+router = APIRouter(prefix="/abilities", tags=["Abilities"])
+
+@router.get("/", response_model=list[AbilityRead])
+async def list_abilities(db: AsyncSession = Depends(get_db)):
+    """
+    Получить список всех абилок с деталями по расам, классам и персонажам.
+    """
+    result = await db.execute(
+        select(AbilityModel).options(
+            selectinload(AbilityModel.races),
+            selectinload(AbilityModel.professions),
+            selectinload(AbilityModel.characters)
+        )
+    )
+    abilities = result.scalars().all()
+
+    return [
+        AbilityRead(
+            id=ability.id,
+            name=ability.name,
+            description=ability.description,
+            cooldown=ability.cooldown,
+            activation_condition=ability.activation_condition,
+            allowed_races=[r.name for r in ability.races],
+            allowed_professions=[p.name for p in ability.professions],
+            character_ids=[c.id for c in ability.characters]
+        )
+        for ability in abilities
+    ]
+
+@router.get("/{ability_id}", response_model=AbilityRead)
+async def read_ability(ability_id: int, db: AsyncSession = Depends(get_db)):
+    """
+    Получить одну абилку по ID.
+    """
+    result = await db.execute(
+        select(AbilityModel)
+        .options(
+            selectinload(AbilityModel.races),
+            selectinload(AbilityModel.professions),
+            selectinload(AbilityModel.characters)
+        )
+        .where(AbilityModel.id == ability_id)
+    )
+    ability = result.scalar_one_or_none()
+    if not ability:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ability not found")
+
+    return AbilityRead(
+        id=ability.id,
+        name=ability.name,
+        description=ability.description,
+        cooldown=ability.cooldown,
+        activation_condition=ability.activation_condition,
+        allowed_races=[r.name for r in ability.races],
+        allowed_professions=[p.name for p in ability.professions],
+        character_ids=[c.id for c in ability.characters]
+    )
+
+@router.post("/", response_model=AbilityRead, status_code=status.HTTP_201_CREATED)
+async def create_ability(data: AbilityCreate, db: AsyncSession = Depends(get_db)):
+    """
+    Создать новую абилку.
+    """
+    ability = AbilityModel(
+        name=data.name,
+        description=data.description,
+        cooldown=data.cooldown,
+        activation_condition=data.activation_condition
+    )
+
+    # Привязка к расам
+    if data.allowed_race_ids:
+        races = await db.execute(select(RaceModel).where(RaceModel.id.in_(data.allowed_race_ids)))
+        ability.races = races.scalars().all()
+
+    # Привязка к профессиям
+    if data.allowed_profession_ids:
+        profs = await db.execute(select(ProfessionModel).where(ProfessionModel.id.in_(data.allowed_profession_ids)))
+        ability.professions = profs.scalars().all()
+
+    # Привязка к персонажам (необязательно)
+    if data.character_ids:
+        chars = await db.execute(select(CharacterModel).where(CharacterModel.id.in_(data.character_ids)))
+        ability.characters = chars.scalars().all()
+
+    db.add(ability)
+    await db.commit()
+    await db.refresh(ability)
+
+    return AbilityRead(
+        id=ability.id,
+        name=ability.name,
+        description=ability.description,
+        cooldown=ability.cooldown,
+        activation_condition=ability.activation_condition,
+        allowed_races=[r.name for r in ability.races],
+        allowed_professions=[p.name for p in ability.professions],
+        character_ids=[c.id for c in ability.characters]
+    )
+
+@router.put("/{ability_id}", response_model=AbilityRead)
+async def update_ability(ability_id: int, data: AbilityUpdate, db: AsyncSession = Depends(get_db)):
+    """
+    Обновить абилку по ID.
+    """
+    result = await db.execute(
+        select(AbilityModel)
+        .options(
+            selectinload(AbilityModel.races),
+            selectinload(AbilityModel.professions),
+            selectinload(AbilityModel.characters)
+        )
+        .where(AbilityModel.id == ability_id)
+    )
+    ability = result.scalar_one_or_none()
+    if not ability:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ability not found")
+
+    # Обновляем поля
+    if data.name is not None:
+        ability.name = data.name
+    if data.description is not None:
+        ability.description = data.description
+    if data.cooldown is not None:
+        ability.cooldown = data.cooldown
+    if data.activation_condition is not None:
+        ability.activation_condition = data.activation_condition  # ← обновляем условие
+
+    # Обновляем связи
+    if data.allowed_race_ids is not None:
+        races = await db.execute(select(RaceModel).where(RaceModel.id.in_(data.allowed_race_ids)))
+        ability.races = races.scalars().all()
+
+    if data.allowed_profession_ids is not None:
+        profs = await db.execute(select(ProfessionModel).where(ProfessionModel.id.in_(data.allowed_profession_ids)))
+        ability.professions = profs.scalars().all()
+
+    if data.character_ids is not None:
+        chars = await db.execute(select(CharacterModel).where(CharacterModel.id.in_(data.character_ids)))
+        ability.characters = chars.scalars().all()
+
+    await db.commit()
+    await db.refresh(ability)
+
+    return AbilityRead(
+        id=ability.id,
+        name=ability.name,
+        description=ability.description,
+        cooldown=ability.cooldown,
+        activation_condition=ability.activation_condition,
+        allowed_races=[r.name for r in ability.races],
+        allowed_professions=[p.name for p in ability.professions],
+        character_ids=[c.id for c in ability.characters]
+    )
+
+@router.delete("/{ability_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_ability(ability_id: int, db: AsyncSession = Depends(get_db)):
+    """
+    Удалить абилку.
+    """
+    result = await db.execute(select(AbilityModel).where(AbilityModel.id == ability_id))
+    ability = result.scalar_one_or_none()
+    if not ability:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ability not found")
+    await db.delete(ability)
+    await db.commit()
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\routers\auth.py ===
+from fastapi import APIRouter, Depends, HTTPException, status, Body
+from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+from jose import jwt
+from datetime import datetime, timedelta, timezone
+from dotenv import load_dotenv
+import urllib.parse
+import hmac
+import hashlib
+import json
+import os
+import logging
+
+from app.database import get_db
+from app.models.player import Player as PlayerModel
+
+# ---------------- ЛОГГЕР ----------------
+logger = logging.getLogger("uvicorn.error")
+logger.setLevel(logging.INFO)
+
+# ------------- ЗАГРУЗКА КОНФИГА -------------
+load_dotenv()
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+JWT_SECRET = os.getenv("JWT_SECRET", "").strip()
+JWT_ALGORITHM = "HS256"
+
+router = APIRouter(prefix="/auth", tags=["Auth"])
+
+
+class TelegramInitData(BaseModel):
+    initData: str  # query_id=...&user=...&auth_date=...&hash=...
+
+
+def verify_telegram_hash(init_data: str) -> dict[str, str]:
+    """
+    Проверка подписи Telegram WebApp initData по официальному алгоритму:
+    1) parse_qsl (URL-decode всех значений)
+    2) Исключаем hash
+    3) Формируем data_check_string из всех остальных пар (key=value), сортируем
+    4) secret_key = HMAC_SHA256(key="WebAppData", msg=BOT_TOKEN)
+    5) calculated_hash = HMAC_SHA256(key=secret_key, msg=data_check_string)
+    6) Сравниваем calculated_hash и полученный hash
+    """
+    logger.info("▶️ initData: %s", init_data)
+
+    if not BOT_TOKEN:
+        logger.error("❌ TELEGRAM_BOT_TOKEN не задан в окружении")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Server misconfigured")
+
+    # 1) URL-декодируем в словарь
+    try:
+        params = dict(urllib.parse.parse_qsl(init_data, keep_blank_values=True, strict_parsing=True))
+        logger.info("   — Пары после parse_qsl: %s", params)
+    except ValueError as e:
+        logger.error("❌ Ошибка парсинга initData: %s", e)
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid initData format")
+
+    # 2) Извлекаем и удаляем hash
+    received_hash = params.pop("hash", None)
+    logger.info("   — received_hash: %s", received_hash)
+    if not received_hash:
+        logger.error("❌ Параметр hash отсутствует")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Missing hash")
+
+    # 3) Собираем массив пар key=value (остальные параметры)
+    kv_list = [f"{k}={params[k]}" for k in params.keys()]
+    # Если есть signature, оно уже в params и войдёт в массив — это нормально.
+    # Логи показывают полный список:
+    logger.info("   — Пары для data_check_string (до сортировки): %s", kv_list)
+
+    # 4) Сортируем лексикографически по ключу
+    kv_list.sort(key=lambda s: s.split("=", 1)[0])
+    logger.info("   — Пары для data_check_string (после сортировки): %s", kv_list)
+
+    # 5) Form data_check_string
+    data_check_string = "\n".join(kv_list).encode("utf-8")
+    logger.info("   — data_check_string:\n%s", data_check_string.decode("utf-8"))
+
+    # 6) Вычисляем секретный ключ: HMAC_SHA256(key="WebAppData", msg=BOT_TOKEN)
+    secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode("utf-8"), hashlib.sha256).digest()
+    logger.info("   — secret_key = HMAC_SHA256('WebAppData', BOT_TOKEN) hex: %s", secret_key.hex())
+
+    # 7) Вычисляем окончательный хеш
+    calculated_hash = hmac.new(secret_key, data_check_string, hashlib.sha256).hexdigest()
+    logger.info("   — calculated_hash: %s", calculated_hash)
+
+    # 8) Сравниваем
+    if not hmac.compare_digest(calculated_hash, received_hash):
+        logger.error("❌ Хеши не совпали (calculated != received)")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Invalid authentication data")
+
+    logger.info("✅ Проверка подписи initData пройдена успешно")
+    return params  # возвращаем декодированные params для дальнейшей работы
+
+
+@router.post("/telegram", response_model=dict)
+async def telegram_auth(
+    body: TelegramInitData = Body(...),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Эндпоинт /auth/telegram:
+    1. Проверка подписи initData
+    2. Извлечение данных user
+    3. Создание или обновление записи Player
+    4. Генерация и возврат JWT
+    """
+    logger.info("▶️ Запрос POST /auth/telegram")
+
+    # 1) Валидация initData
+    params = verify_telegram_hash(body.initData)
+
+    # 2) Извлечение инфо о пользователе
+    raw_user = params.get("user")
+    if raw_user:
+        try:
+            user_info = json.loads(raw_user)
+            logger.info("   — Распарсенный user: %s", user_info)
+        except Exception as e:
+            logger.error("❌ Ошибка JSON.loads(user): %s", e)
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid user JSON")
+    else:
+        user_info = params
+        logger.info("   — Используем params как user_info: %s", user_info)
+
+    # 3) Достаём обязательные поля
+    try:
+        telegram_id = int(user_info.get("id"))
+        logger.info("   — telegram_id: %s", telegram_id)
+    except Exception as e:
+        logger.error("❌ Неверный telegram_id: %s", e)
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid Telegram ID")
+
+    first_name = user_info.get("first_name", "")
+    username = user_info.get("username")
+    logger.info("   — first_name=%s, username=%s", first_name, username)
+
+    # 4) Работа с базой
+    try:
+        result = await db.execute(select(PlayerModel).where(PlayerModel.telegram_id == telegram_id))
+        player = result.scalar_one_or_none()
+    except Exception as e:
+        logger.error("❌ Ошибка запроса к БД: %s", e)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Database error")
+
+    if not player:
+        logger.info("   — Игрок не найден, создаём запись")
+        player = PlayerModel(telegram_id=telegram_id, name=first_name, username=username, role="player")
+        db.add(player)
+    else:
+        logger.info("   — Игрок найден (ID=%s), обновляем если нужно", player.id)
+        updated = False
+        if player.name != first_name:
+            player.name = first_name; updated = True
+            logger.info("      • Обновили name")
+        if player.username != username:
+            player.username = username; updated = True
+            logger.info("      • Обновили username")
+        if updated:
+            db.add(player)
+
+    # 5) Сохраняем
+    try:
+        logger.info("   — Коммитим изменения")
+        await db.commit()
+        await db.refresh(player)
+        logger.info("   — Коммит успешен")
+    except Exception as e:
+        logger.error("❌ Ошибка при сохранении: %s", e)
+        await db.rollback()
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Database commit error")
+
+    # 6) Генерация JWT
+    expire = datetime.now(tz=timezone.utc) + timedelta(days=7)
+    token = jwt.encode({"sub": str(player.id), "exp": expire}, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    logger.info("   — JWT сгенерирован")
+
+    # 7) Отдаём токен
+    logger.info("✅ /auth/telegram успешно завершён")
+    return {"access_token": token, "token_type": "bearer"}
+
+##############################################################################################
+###                              роутер для веб версии                                     ###
+##############################################################################################
+
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+REFRESH_TOKEN_EXPIRE_DAYS = 7
+
+def verify_telegram_widget_data(params: dict) -> dict:
+    """
+    Проверяет подпись данных от Telegram Login Widget.
+    params: словарь с полями id, first_name, username, auth_date, hash и др.
+    """
+    if not BOT_TOKEN:
+        logger.error("❌ TELEGRAM_BOT_TOKEN не задан")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Server misconfigured")
+
+    # Извлекаем hash
+    received_hash = params.get("hash")
+    if not received_hash:
+        logger.error("❌ Параметр hash отсутствует")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Missing hash")
+
+    # Формируем data_check_string: сортируем ключи, исключая hash
+    data_check_items = [(k, v) for k, v in params.items() if k != "hash"]
+    data_check_items.sort(key=lambda x: x[0])
+    data_check_string = "\n".join(f"{k}={v}" for k, v in data_check_items)
+    logger.info("data_check_string:\n%s", data_check_string)
+
+    # Вычисляем секретный ключ: SHA256(BOT_TOKEN)
+    secret_key = hashlib.sha256(BOT_TOKEN.encode("utf-8")).digest()
+    # Вычисляем HMAC-SHA-256
+    calculated_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
+    logger.info("calculated_hash: %s, received_hash: %s", calculated_hash, received_hash)
+
+    if not hmac.compare_digest(calculated_hash, received_hash):
+        logger.error("❌ Хеши не совпали")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Invalid authentication data")
+
+    # Проверяем свежесть данных (например, не старше 24 часов)
+    auth_date = int(params.get("auth_date", 0))
+    current_time = int(datetime.utcnow().timestamp())
+    if current_time - auth_date > 86400:
+        logger.error("❌ Данные устарели (auth_date слишком старый)")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Authentication data is outdated")
+
+    logger.info("✅ Проверка подписи виджета пройдена")
+    return params
+
+@router.get("/telegram-widget", response_model=dict)
+async def telegram_widget_auth(
+    id: int,
+    first_name: str | None = None,
+    last_name: str | None = None,
+    username: str | None = None,
+    photo_url: str | None = None,
+    auth_date: int = 0,
+    hash: str = "",
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Обрабатывает данные от Telegram Login Widget, возвращает JWT-токен.
+    Параметры приходят как GET-параметры от редиректа.
+    """
+    # Формируем словарь параметров
+    params = {
+        "id": str(id),
+        "auth_date": str(auth_date),
+        "hash": hash
+    }
+    if first_name:
+        params["first_name"] = first_name
+    if last_name:
+        params["last_name"] = last_name
+    if username:
+        params["username"] = username
+    if photo_url:
+        params["photo_url"] = photo_url
+
+    # Проверяем подпись
+    try:
+        verified_params = verify_telegram_widget_data(params)
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error("❌ Неожиданная ошибка: %s", str(e))
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid data")
+
+    # Извлекаем telegram_id
+    telegram_id = int(verified_params["id"])
+
+    # Ищем или создаем игрока
+    result = await db.execute(
+        select(PlayerModel).where(PlayerModel.telegram_id == telegram_id)
+    )
+    player = result.scalar_one_or_none()
+
+    if not player:
+        player = PlayerModel(
+            telegram_id=telegram_id,
+            name=verified_params.get("first_name", "Unknown"),
+            username=verified_params.get("username", None),
+            role="player",
+            active_as="player"
+        )
+        db.add(player)
+        await db.commit()
+        await db.refresh(player)
+
+    # Создаем JWT-токен
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = jwt.encode(
+        {"sub": str(player.id), "exp": datetime.utcnow() + access_token_expires},
+        JWT_SECRET,
+        algorithm=JWT_ALGORITHM
+    )
+
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\routers\characters.py ===
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+from sqlalchemy.orm import selectinload
+from typing import List
+
+from app.database import get_db
+from app.models.character import Character as CharacterModel
+from app.models.ability import Ability as AbilityModel
+from app.schemas.character import CharacterCreate, CharacterUpdate, CharacterRead
+from app.models.inventory import Inventory as InventoryModel
+from app.schemas.inventory import InventoryGroup
+
+# Импортируем get_current_user, чтобы «узнавать» player из JWT
+from app.core.auth import get_current_user
+from app.models.player import Player as PlayerModel
+
+# Импортируем модели Race, Profession, Level
+from app.models.race import Race as RaceModel
+from app.models.profession import Profession as ProfessionModel
+from app.models.level import Level as LevelModel
+
+# Импортируем функцию, которая определяет роль пользователя Игрок/Мастер:
+from app.core.roles import require_active_as
+
+router = APIRouter(
+    prefix="/characters",
+    tags=["Characters"]
+)
+
+@router.get("/me", response_model=List[CharacterRead])
+async def list_my_characters(
+    current_user: PlayerModel = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Вернуть всех персонажей, принадлежащих текущему (залогиненному) игроку.
+    """
+    result = await db.execute(
+        select(CharacterModel)
+        .where(CharacterModel.player_id == current_user.id)
+        .options(
+            selectinload(CharacterModel.race),
+            selectinload(CharacterModel.profession),
+            selectinload(CharacterModel.level),
+            selectinload(CharacterModel.abilities),
+            selectinload(CharacterModel.inventory_items),
+        )
+    )
+    return result.scalars().all()
+
+
+@router.get("/{character_id}", response_model=CharacterRead)
+async def get_character(character_id: int, db: AsyncSession = Depends(get_db)):
+    """
+    Вернуть одного персонажа по ID вместе с его способностями.
+    """
+    result = await db.execute(
+        select(CharacterModel)
+        .where(CharacterModel.id == character_id)
+        .options(
+            selectinload(CharacterModel.race),
+            selectinload(CharacterModel.profession),
+            selectinload(CharacterModel.level),
+            selectinload(CharacterModel.abilities),
+            selectinload(CharacterModel.inventory_items),
+        )
+    )
+    character = result.scalar_one_or_none()
+    if not character:
+        raise HTTPException(status_code=404, detail="Character not found")
+    return character
+
+
+@router.post("/", response_model=CharacterRead, status_code=201)
+async def create_character(
+    new_char: CharacterCreate,
+    current_user: PlayerModel = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Создать нового персонажа. 
+    Логика:
+    1. Проверяем, что race_id, profession_id, level_id существуют.
+    2. Сохраняем все поля, включая «финальные» статы, которые прислал фронтенд.
+    """
+    # --- Шаг 1: проверка существования Race, Class, Level ---
+    result_race = await db.execute(select(RaceModel).where(RaceModel.id == new_char.race_id))
+    race_obj = result_race.scalar_one_or_none()
+    if not race_obj:
+        raise HTTPException(status_code=404, detail="Race not found")
+
+    result_prof = await db.execute(select(ProfessionModel).where(ProfessionModel.id == new_char.profession_id)) # это класс в системе днд
+    prof_obj = result_prof.scalar_one_or_none()
+    if not prof_obj:
+        raise HTTPException(status_code=404, detail="Profession not found")
+
+    result_lvl = await db.execute(select(LevelModel).where(LevelModel.id == new_char.level_id))
+    lvl_obj = result_lvl.scalar_one_or_none()
+    if not lvl_obj:
+        raise HTTPException(status_code=404, detail="Level not found")
+
+    # --- Шаг 2: создаём модель с данными из запроса ---
+    character = CharacterModel(
+        name=new_char.name,
+        player_id=None if new_char.is_npc else current_user.id,
+        session_id=new_char.session_id,
+        race_id=new_char.race_id,
+        profession_id=new_char.profession_id,
+        level_id=new_char.level_id,
+        is_npc=new_char.is_npc,
+        avatar_url=new_char.avatar_url,
+        hp=new_char.hp,
+        armor=new_char.armor,
+        strength=new_char.strength,
+        dexterity=new_char.dexterity,
+        constitution=new_char.constitution,
+        intelligence=new_char.intelligence,
+        wisdom=new_char.wisdom,
+        charisma=new_char.charisma,
+        shards=new_char.shards
+    )
+
+    # Присваиваем способности, если они пришли:
+    if new_char.ability_ids:
+        result_abilities = await db.execute(
+            select(AbilityModel).where(AbilityModel.id.in_(new_char.ability_ids))
+        )
+        character.abilities = result_abilities.scalars().all()
+
+    db.add(character)
+    await db.commit()
+    await db.refresh(character)
+
+    # Повторная загрузка с .options(selectinload(...))
+    result = await db.execute(
+        select(CharacterModel)
+        .where(CharacterModel.id == character.id)
+        .options(
+            selectinload(CharacterModel.race),
+            selectinload(CharacterModel.profession),
+            selectinload(CharacterModel.level),
+            selectinload(CharacterModel.abilities),
+            selectinload(CharacterModel.inventory_items),
+        )
+    )
+    return result.scalar_one()
+
+
+@router.put("/{character_id}", response_model=CharacterRead)
+async def update_character(
+    character_id: int,
+    data: CharacterUpdate, # <- сюда прилетит JSON { "abilities": [...] }
+    current_user: PlayerModel = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Обновить данные персонажа и его способности, но только если этот персонаж
+    действительно принадлежит текущему пользователю.
+    """
+    # Загрузить и проверить права…
+    result = await db.execute(
+        select(CharacterModel)
+        .where(CharacterModel.id == character_id)
+        .options(selectinload(CharacterModel.abilities))
+    )
+    character = result.scalar_one_or_none()
+    if not character:
+        raise HTTPException(status_code=404, detail="Character not found")
+
+    if character.player_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not your character")
+
+    # Обновляем поля, переданные в запросе
+    update_data = data.dict(exclude_unset=True, exclude={"ability_ids"})
+    for field, value in update_data.items():
+        setattr(character, field, value)
+
+    # Обновляем способности из data.ability_ids (поле JSON называется "abilities"), если переданы:
+    if data.ability_ids is not None:
+        res = await db.execute(
+            select(AbilityModel).where(AbilityModel.id.in_(data.ability_ids))
+        )
+        character.abilities = res.scalars().all()
+        db.add(character)
+
+    # Сохраняем и возвращаем актуальный объект с подгрузкой связей
+    await db.commit()
+    result = await db.execute(
+        select(CharacterModel)
+        .where(CharacterModel.id == character.id)
+        .options(
+            selectinload(CharacterModel.race),
+            selectinload(CharacterModel.profession),
+            selectinload(CharacterModel.level),
+            selectinload(CharacterModel.abilities),
+            selectinload(CharacterModel.inventory_items),
+        )
+    )
+    return result.scalar_one()
+
+
+@router.delete("/{character_id}", status_code=204)
+async def delete_character(
+    character_id: int,
+    current_user: PlayerModel = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Удалить персонажа, но только если текущий пользователь — его владелец.
+    """
+    result = await db.execute(select(CharacterModel).where(CharacterModel.id == character_id))
+    character = result.scalar_one_or_none()
+    if not character:
+        raise HTTPException(status_code=404, detail="Character not found")
+
+    if character.player_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not your character")
+
+    await db.delete(character)
+    await db.commit()
+
+
+@router.get("/{character_id}/inventory", response_model=InventoryGroup)
+async def character_inventory(
+    character_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: PlayerModel = Depends(get_current_user)
+):
+    """
+    Вернуть инвентарь персонажа в виде:
+    {
+      "id": <character_id>,
+      "character_id": <character_id>,
+      "items": [
+        { "id": <inv_id>, "quantity": <int>, "equipped": <bool>, "item": { … } },
+        …
+      ]
+    }
+    """
+    # Проверка существования персонажа и прав
+    result_char = await db.execute(select(CharacterModel).where(CharacterModel.id == character_id))
+    character = result_char.scalar_one_or_none()
+    if not character:
+        raise HTTPException(status_code=404, detail="Character not found")
+    if character.player_id != current_user.id and current_user.active_as != "master":
+        raise HTTPException(status_code=403, detail="Not your character")
+
+    # Грузим записи инвентаря вместе с деталями item
+    res_inv = await db.execute(
+        select(InventoryModel)
+        .where(InventoryModel.character_id == character_id)
+        .options(selectinload(InventoryModel.item))
+    )
+    inv_items = res_inv.scalars().all()
+
+    return InventoryGroup(
+        id=character_id,
+        character_id=character_id,
+        items=inv_items
+    )
+
+
+@router.get("/", response_model=List[CharacterRead])
+async def get_all_characters(
+    db: AsyncSession = Depends(get_db),
+    current_user: PlayerModel = Depends(require_active_as("master"))
+):
+    """
+    Вернуть всех персонажей, - доступно мастеру
+    """
+    result = await db.execute(
+        select(CharacterModel).options(
+            selectinload(CharacterModel.race),
+            selectinload(CharacterModel.profession),
+            selectinload(CharacterModel.level),
+            selectinload(CharacterModel.abilities),
+            selectinload(CharacterModel.inventory_items),
+        )
+    )
+    return result.scalars().all()
+
+
+@router.get("/available-npcs", response_model=List[CharacterRead])
+async def list_available_npcs(
+    db: AsyncSession = Depends(get_db),
+    current_user: PlayerModel = Depends(require_active_as("master"))
+):
+    """
+    Вернуть всех NPC, которые доступны для назначения игрокам.
+    """
+    result = await db.execute(
+        select(CharacterModel)
+        .where(CharacterModel.is_npc == True)
+        .where(CharacterModel.player_id == None)
+        .options(
+            selectinload(CharacterModel.race),
+            selectinload(CharacterModel.profession),
+            selectinload(CharacterModel.level),
+            selectinload(CharacterModel.abilities),
+            selectinload(CharacterModel.inventory_items),
+        )
+    )
+    return result.scalars().all()
+
+
+@router.post("/{character_id}/assign-to-player", status_code=200)
+async def assign_npc_to_player(
+    character_id: int,
+    player_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: PlayerModel = Depends(require_active_as("master"))
+):
+    """
+    Присвоить NPC игроку.
+    - Только мастер может это сделать.
+    - NPC становится персонажем (is_npc=False).
+    """
+    # Найдём персонажа
+    result = await db.execute(select(CharacterModel).where(CharacterModel.id == character_id))
+    character = result.scalar_one_or_none()
+
+    if not character:
+        raise HTTPException(status_code=404, detail="Character not found")
+    if not character.is_npc:
+        raise HTTPException(status_code=400, detail="Character is not an NPC")
+    if character.player_id is not None:
+        raise HTTPException(status_code=400, detail="NPC already assigned to a player")
+
+    # Проверим, существует ли игрок
+    res_player = await db.execute(select(PlayerModel).where(PlayerModel.id == player_id))
+    player = res_player.scalar_one_or_none()
+    if not player:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    # Присваиваем
+    character.player_id = player.id
+    character.is_npc = False
+
+    await db.commit()
+    await db.refresh(character)
+
+    return {"detail": f"NPC '{character.name}' теперь принадлежит игроку {player_id}"}
+
+
+@router.post("/{character_id}/unassign", status_code=200)
+async def unassign_character_from_player(
+    character_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: PlayerModel = Depends(require_active_as("master"))
+):
+    """
+    Отвязать персонажа от игрока (вернуть в состояние NPC).
+    Только мастер может это делать.
+    """
+    result = await db.execute(select(CharacterModel).where(CharacterModel.id == character_id))
+    character = result.scalar_one_or_none()
+
+    if not character:
+        raise HTTPException(status_code=404, detail="Character not found")
+
+    if character.player_id is None:
+        raise HTTPException(status_code=400, detail="Character is not assigned to any player")
+
+    # Отвязываем
+    character.player_id = None
+    character.is_npc = True
+
+    await db.commit()
+    await db.refresh(character)
+
+    return {"detail": f"Персонаж '{character.name}' теперь снова NPC"}
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\routers\effects.py ===
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+from typing import List
+
+from app.database import get_db
+from app.models.effect import Effect as EffectModel
+from app.schemas.effect import EffectCreate, EffectRead, EffectUpdate
+
+router = APIRouter(prefix="/effects", tags=["Effects"])
+
+@router.get("/", response_model=List[EffectRead])
+async def list_effects(db: AsyncSession = Depends(get_db)):
+    """Вернуть все эффекты."""
+    result = await db.execute(select(EffectModel))
+    return result.scalars().all()
+
+@router.get("/character/{character_id}", response_model=List[EffectRead])
+async def list_character_effects(
+    character_id: int,
+    db: AsyncSession = Depends(get_db)
+):
+    """Вернуть все эффекты, действующие на конкретного персонажа."""
+    result = await db.execute(
+        select(EffectModel)
+        .where(
+            (EffectModel.target_type == "character") &
+            (EffectModel.target_id == character_id)
+        )
+    )
+    return result.scalars().all()
+
+@router.get("/session/{session_id}", response_model=List[EffectRead])
+async def list_session_effects(
+    session_id: int,
+    db: AsyncSession = Depends(get_db)
+):
+    """Вернуть все эффекты, действующие на конкретной сессии."""
+    result = await db.execute(
+        select(EffectModel)
+        .where(
+            (EffectModel.target_type == "session") &
+            (EffectModel.target_id == session_id)
+        )
+    )
+    return result.scalars().all()
+
+@router.post("/", response_model=EffectRead, status_code=201)
+async def create_effect(data: EffectCreate, db: AsyncSession = Depends(get_db)):
+    """Создать новый эффект."""
+    effect = EffectModel(**data.dict())
+    db.add(effect)
+    await db.commit()
+    await db.refresh(effect)
+    return effect
+
+@router.put("/{effect_id}", response_model=EffectRead)
+async def update_effect(
+    effect_id: int,
+    data: EffectUpdate,
+    db: AsyncSession = Depends(get_db)
+):
+    """Обновить существующий эффект."""
+    result = await db.execute(select(EffectModel).where(EffectModel.id == effect_id))
+    effect = result.scalar_one_or_none()
+    if not effect:
+        raise HTTPException(status_code=404, detail="Effect not found")
+    for field, value in data.dict(exclude_unset=True).items():
+        setattr(effect, field, value)
+    await db.commit()
+    await db.refresh(effect)
+    return effect
+
+@router.delete("/{effect_id}", status_code=204)
+async def delete_effect(effect_id: int, db: AsyncSession = Depends(get_db)):
+    """Удалить эффект по ID."""
+    result = await db.execute(select(EffectModel).where(EffectModel.id == effect_id))
+    effect = result.scalar_one_or_none()
+    if not effect:
+        raise HTTPException(status_code=404, detail="Effect not found")
+    await db.delete(effect)
+    await db.commit()
+    return
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\routers\event_instance.py ===
+from fastapi import APIRouter, Depends
+from typing import List
+from app.schemas.event_instance import EventInstance, EventInstanceCreate
+from app.dependencies.db import FakeDatabase, get_db
+
+router = APIRouter(
+    prefix="/events",
+    tags=["events"]
+)
+
+@router.get("/", response_model=List[EventInstance])
+def list_event_instances(db: FakeDatabase = Depends(get_db)):
+    return db.list_event_instances()
+
+@router.post("/", response_model=EventInstance)
+def create_event_instance(event_instance: EventInstanceCreate, db: FakeDatabase = Depends(get_db)):
+    new_event_instance = EventInstance(id=len(db.event_instances) + 1, **event_instance.dict())
+    return db.create_event_instance(new_event_instance)
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\routers\event_templates.py ===
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+
+from app.database import get_db
+from app.models.event_template import EventTemplate as EventTemplateModel
+from app.schemas.event_template import EventTemplateCreate, EventTemplateRead, EventTemplateUpdate
+
+router = APIRouter(prefix="/event_templates", tags=["EventTemplates"])
+
+@router.get("/", response_model=list[EventTemplateRead])
+async def list_event_templates(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(EventTemplateModel))
+    return result.scalars().all()
+
+
+@router.get("/{template_id}", response_model=EventTemplateRead)
+async def read_event_template(template_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(EventTemplateModel).where(EventTemplateModel.id == template_id)
+    )
+    template = result.scalar_one_or_none()
+    if not template:
+        raise HTTPException(404, detail="EventTemplate not found")
+    return template
+
+
+@router.post("/", response_model=EventTemplateRead, status_code=201)
+async def create_event_template(
+    data: EventTemplateCreate,
+    db: AsyncSession = Depends(get_db)
+):
+    template = EventTemplateModel(**data.dict())
+    db.add(template)
+    await db.commit()
+    await db.refresh(template)
+    return template
+
+
+@router.put("/{template_id}", response_model=EventTemplateRead)
+async def update_event_template(
+    template_id: int,
+    data: EventTemplateUpdate,
+    db: AsyncSession = Depends(get_db)
+):
+    result = await db.execute(
+        select(EventTemplateModel).where(EventTemplateModel.id == template_id)
+    )
+    template = result.scalar_one_or_none()
+    if not template:
+        raise HTTPException(404, detail="EventTemplate not found")
+
+    for field, value in data.dict(exclude_unset=True).items():
+        setattr(template, field, value)
+
+    await db.commit()
+    await db.refresh(template)
+    return template
+
+
+@router.delete("/{template_id}", status_code=204)
+async def delete_event_template(template_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(EventTemplateModel).where(EventTemplateModel.id == template_id)
+    )
+    template = result.scalar_one_or_none()
+    if not template:
+        raise HTTPException(404, detail="EventTemplate not found")
+
+    await db.delete(template)
+    await db.commit()
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\routers\inventory.py ===
+# app/routers/inventory.py
+
+from typing import Optional, List
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+from sqlalchemy.orm import selectinload, joinedload
+
+from app.database import get_db
+from app.models.inventory import Inventory as InventoryModel
+from app.models.character import Character as CharacterModel
+from app.schemas.inventory import InventoryCreate, InventoryItemRead
+from app.core.auth import get_current_user
+from app.models.player import Player as PlayerModel
+
+router = APIRouter(prefix="/inventory", tags=["Inventory"])
+
+
+@router.get("/me", response_model=List[InventoryItemRead])
+async def list_my_inventory(
+    db: AsyncSession = Depends(get_db),
+    current_user: PlayerModel = Depends(get_current_user)
+):
+    """
+    Вернуть все записи инвентаря персонажей текущего игрока.
+    Мастер видит инвентари всех.
+    """
+    stmt = select(InventoryModel).options(selectinload(InventoryModel.item))
+    if current_user.active_as != "master":
+        # Фильтруем по персонажам, принадлежащим текущему игроку
+        stmt = stmt.join(CharacterModel).where(CharacterModel.player_id == current_user.id)
+    result = await db.execute(stmt)
+    return result.scalars().all()
+
+
+@router.get("/", response_model=List[InventoryItemRead])
+async def list_inventory(
+    character_id: Optional[int] = Query(None, description="ID персонажа для фильтрации"),
+    db: AsyncSession = Depends(get_db),
+    current_user: PlayerModel = Depends(get_current_user)
+):
+    """
+    Если указан character_id — вернёт вещи этого персонажа (любого) для просмотра/воровства;.
+    Если не указан:
+      - мастер получит все записи inventory;
+      - обычный игрок — только свои (как /me).
+    """
+    stmt = select(InventoryModel).options(selectinload(InventoryModel.item))
+    if character_id is not None:
+        # любой может посмотреть чужой инвентарь
+        stmt = stmt.where(InventoryModel.character_id == character_id)
+    else:
+        # без фильтра мастеру — всё, остальным — только свои
+        if current_user.active_as != "master":
+            stmt = stmt.join(CharacterModel).where(CharacterModel.player_id == current_user.id)
+    result = await db.execute(stmt)
+    return result.scalars().all()
+
+
+@router.post("/", response_model=InventoryItemRead, status_code=status.HTTP_201_CREATED)
+async def add_to_inventory(
+    data: InventoryCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: PlayerModel = Depends(get_current_user)
+):
+    """
+    Добавить предмет в инвентарь.
+    Обычный игрок может добавить только себе (data.character_id == его ID персонажа).
+    Мастер — в любой.
+    """
+    if current_user.active_as != "master":
+        # проверяем, что переданный character_id принадлежит ему
+        res = await db.execute(select(CharacterModel).where(
+            (CharacterModel.id == data.character_id) &
+            (CharacterModel.player_id == current_user.id)
+        ))
+        if not res.scalar_one_or_none():
+            raise HTTPException(status_code=403, detail="Cannot add to someone else's inventory")
+
+    inv = InventoryModel(**data.dict())
+    db.add(inv)
+    await db.commit()
+    await db.refresh(inv)
+    # подгружаем item
+    await db.refresh(inv, ["item"])
+    return inv
+
+
+@router.delete("/{inv_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def remove_from_inventory(
+    inv_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: PlayerModel = Depends(get_current_user)
+):
+    """
+    Удалить запись из инвентаря.
+    Обычный игрок — только свои; мастер — любые.
+    """
+    res = await db.execute(
+        select(InventoryModel).where(InventoryModel.id == inv_id).options(selectinload(InventoryModel.item))
+    )
+    inv = res.scalar_one_or_none()
+    if not inv:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    if current_user.active_as != "master":
+        # проверяем владельца
+        if inv.character_id:
+            res_char = await db.execute(select(CharacterModel).where(
+                (CharacterModel.id == inv.character_id) &
+                (CharacterModel.player_id == current_user.id)
+            ))
+            if not res_char.scalar_one_or_none():
+                raise HTTPException(status_code=403, detail="Cannot remove from someone else's inventory")
+
+    await db.delete(inv)
+    await db.commit()
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\routers\items.py ===
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+
+from app.database import get_db
+from app.models.item import Item as ItemModel
+from app.schemas.item import ItemCreate, ItemRead
+
+router = APIRouter(prefix="/items", tags=["Items"])
+
+@router.get("/", response_model=list[ItemRead])
+async def list_items(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(ItemModel))
+    return result.scalars().all()
+
+@router.get("/{item_id}", response_model=ItemRead)
+async def read_item(item_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(ItemModel).where(ItemModel.id == item_id))
+    item = result.scalar_one_or_none()
+    if not item:
+        raise HTTPException(404, "Item not found")
+    return item
+
+@router.post("/", response_model=ItemRead, status_code=201)
+async def create_item(data: ItemCreate, db: AsyncSession = Depends(get_db)):
+    item = ItemModel(**data.dict())
+    db.add(item)
+    await db.commit()
+    await db.refresh(item)
+    return item
+
+@router.put("/{item_id}", response_model=ItemRead)
+async def update_item(item_id: int, data: ItemCreate, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(ItemModel).where(ItemModel.id == item_id))
+    item = result.scalar_one_or_none()
+    if not item:
+        raise HTTPException(404, "Item not found")
+    for k, v in data.dict().items():
+        setattr(item, k, v)
+    await db.commit()
+    await db.refresh(item)
+    return item
+
+@router.delete("/{item_id}", status_code=204)
+async def delete_item(item_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(ItemModel).where(ItemModel.id == item_id))
+    item = result.scalar_one_or_none()
+    if not item:
+        raise HTTPException(404, "Item not found")
+    await db.delete(item)
+    await db.commit()
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\routers\levels.py ===
+from fastapi import APIRouter, Depends, HTTPException, status
+from typing import List
+
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+
+from app.database import get_db
+from app.models.level import Level as LevelModel
+from app.schemas.level import LevelCreate, LevelRead
+
+router = APIRouter(
+    prefix="/levels",
+    tags=["Levels"]
+)
+
+@router.get("/", response_model=List[LevelRead])
+async def list_levels(db: AsyncSession = Depends(get_db)):
+    """
+    Вернуть список всех уровней (1, 2, …) с их бонусами.
+    """
+    result = await db.execute(select(LevelModel))
+    levels = result.scalars().all()
+    return levels
+
+@router.get("/{level_id}", response_model=LevelRead)
+async def get_level(level_id: int, db: AsyncSession = Depends(get_db)):
+    """
+    Вернуть конкретный уровень по его ID.
+    """
+    result = await db.execute(select(LevelModel).where(LevelModel.id == level_id))
+    lvl = result.scalar_one_or_none()
+    if not lvl:
+        raise HTTPException(status_code=404, detail="Level not found")
+    return lvl
+
+@router.post("/", response_model=LevelRead, status_code=201)
+async def create_level(lvl: LevelCreate, db: AsyncSession = Depends(get_db)):
+    """
+    Добавить новый уровень (для тестов/seed).
+    """
+    new_lvl = LevelModel(
+        id=lvl.id,
+        hp_increase=lvl.hp_increase,
+        bonus_attribute=lvl.bonus_attribute,
+        description=lvl.description
+    )
+    db.add(new_lvl)
+    await db.commit()
+    await db.refresh(new_lvl)
+    return new_lvl
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\routers\maps.py ===
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+from typing import List
+
+from app.database import get_db
+from app.models.map import Map as MapModel
+from app.schemas.map import MapCreate, MapRead
+
+router = APIRouter(prefix="/maps", tags=["Maps"])
+
+@router.get("/", response_model=List[MapRead])
+async def list_maps(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(MapModel))
+    return result.scalars().all()
+
+@router.get("/{map_id}", response_model=MapRead)
+async def read_map(map_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(MapModel).where(MapModel.id == map_id))
+    map_obj = result.scalar_one_or_none()
+    if not map_obj:
+        raise HTTPException(404, detail="Map not found")
+    return map_obj
+
+@router.post("/", response_model=MapRead, status_code=201)
+async def create_map(data: MapCreate, db: AsyncSession = Depends(get_db)):
+    map_obj = MapModel(**data.dict())
+    db.add(map_obj)
+    await db.commit()
+    await db.refresh(map_obj)
+    return map_obj
+
+@router.delete("/{map_id}", status_code=204)
+async def delete_map(map_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(MapModel).where(MapModel.id == map_id))
+    map_obj = result.scalar_one_or_none()
+    if not map_obj:
+        raise HTTPException(404, detail="Map not found")
+    await db.delete(map_obj)
+    await db.commit()
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\routers\map_objects.py ===
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+from typing import List
+
+from app.database import get_db
+from app.models.map_object import MapObject as MapObjectModel
+from app.schemas.map_object import MapObjectCreate, MapObjectRead
+
+router = APIRouter(prefix="/map_objects", tags=["Map Objects"])
+
+@router.get("/", response_model=List[MapObjectRead])
+async def list_map_objects(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(MapObjectModel))
+    return result.scalars().all()
+
+@router.get("/{object_id}", response_model=MapObjectRead)
+async def read_map_object(object_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(MapObjectModel).where(MapObjectModel.id == object_id))
+    obj = result.scalar_one_or_none()
+    if not obj:
+        raise HTTPException(404, detail="MapObject not found")
+    return obj
+
+@router.post("/", response_model=MapObjectRead, status_code=201)
+async def create_map_object(data: MapObjectCreate, db: AsyncSession = Depends(get_db)):
+    obj = MapObjectModel(**data.dict())
+    db.add(obj)
+    await db.commit()
+    await db.refresh(obj)
+    return obj
+
+@router.delete("/{object_id}", status_code=204)
+async def delete_map_object(object_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(MapObjectModel).where(MapObjectModel.id == object_id))
+    obj = result.scalar_one_or_none()
+    if not obj:
+        raise HTTPException(404, detail="MapObject not found")
+    await db.delete(obj)
+    await db.commit()
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\routers\players.py ===
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+
+from app.database import get_db
+from app.schemas.player import PlayerRead, PlayerUpdate
+from app.models.player import Player as PlayerModel
+from app.core.auth import get_current_user
+
+router = APIRouter(
+    prefix="/players",
+    tags=["Players"]
+)
+
+@router.get("/me", response_model=PlayerRead)
+async def read_myself(
+    current_user: PlayerModel = Depends(get_current_user)
+):
+    """
+    Возвращает информацию о текущем (залогиненном через Telegram) игроке.
+    get_current_user достанет JWT из заголовка и найдёт нужного PlayerModel.
+    """
+    return PlayerRead.model_validate(current_user)
+
+@router.get("/", response_model=list[PlayerRead])
+async def get_players(db: AsyncSession = Depends(get_db)):
+    """
+    Вернуть всех игроков.
+    """
+    result = await db.execute(select(PlayerModel))
+    players = result.scalars().all()
+    return [PlayerRead.model_validate(p) for p in players]
+
+@router.get("/{player_id}", response_model=PlayerRead)
+async def get_player(player_id: int, db: AsyncSession = Depends(get_db)):
+    """
+    Вернуть одного игрока по ID.
+    """
+    result = await db.execute(select(PlayerModel).where(PlayerModel.id == player_id))
+    player = result.scalar_one_or_none()
+    if not player:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Player not found")
+    return PlayerRead.model_validate(player)
+
+@router.put("/{player_id}", response_model=PlayerRead)
+async def update_player(
+    player_id: int,
+    data: PlayerUpdate,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Обновить данные игрока:
+      - telegram_id,
+      - name,
+      - username,
+      - role (player/master),
+      - active_as (player/master).
+    """
+    result = await db.execute(select(PlayerModel).where(PlayerModel.id == player_id))
+    player = result.scalar_one_or_none()
+    if not player:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Player not found")
+    
+     # Обновляем каждое поле, если оно было передано
+    if data.telegram_id is not None:
+        player.telegram_id = data.telegram_id
+    if data.name is not None:
+        player.name = data.name
+    if data.username is not None:
+        player.username = data.username
+    if data.role is not None:
+        # допускаем только 'player' или 'master'
+        if data.role not in ("player", "master"):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Role must be 'player' or 'master'")
+        player.role = data.role
+    if data.active_as is not None:
+        # допускаем только 'player' или 'master'
+        if data.active_as not in ("player", "master"):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="active_as must be 'player' or 'master'")
+        # если пытаемся switch_active_as в 'master', но у игрока роли нет — ошибка
+        if data.active_as == "master" and player.role != "master":
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot set active_as='master' if role!='master'")
+        player.active_as = data.active_as
+
+    await db.commit()
+    await db.refresh(player)
+    return PlayerRead.model_validate(player)
+
+@router.delete("/{player_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_player(player_id: int, db: AsyncSession = Depends(get_db)):
+    """
+    Удалить игрока.
+    """
+    result = await db.execute(select(PlayerModel).where(PlayerModel.id == player_id))
+    player = result.scalar_one_or_none()
+    if not player:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Player not found")
+    await db.delete(player)
+    await db.commit()
+
+@router.post("/switch_role")
+async def switch_active_role(
+    new_role: str,
+    current_user: PlayerModel = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Переключить активную роль: 'player' или 'master'.
+
+    Доступ к 'master' разрешён только если роль = master.
+    """
+    if new_role not in ("player", "master"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid role. Use 'player' or 'master'.")
+
+    if new_role == "master" and current_user.role != "master":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You are not allowed to act as a Master.")
+
+    current_user.active_as = new_role
+    await db.commit()
+    return {"message": f"Now acting as {new_role}"}
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\routers\profession.py ===
+from fastapi import APIRouter, Depends, HTTPException, status
+from typing import List
+
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+
+from app.database import get_db
+from app.models.profession import Profession as ProfessionModel
+from app.schemas.profession import ProfessionCreate, ProfessionRead
+
+router = APIRouter(
+    prefix="/professions",
+    tags=["professions"]
+)
+
+@router.get("/", response_model=List[ProfessionRead])
+async def list_professions(db: AsyncSession = Depends(get_db)):
+    """
+    Вернуть список всех классов (Fighter, Rogue, …) и их базовые бонусы.
+    """
+    result = await db.execute(select(ProfessionModel))
+    professions = result.scalars().all()
+    return professions
+
+@router.get("/{Profession_id}", response_model=ProfessionRead)
+async def get_Profession(Profession_id: int, db: AsyncSession = Depends(get_db)):
+    """
+    Вернуть детали конкретного класса по его ID.
+    """
+    result = await db.execute(select(ProfessionModel).where(ProfessionModel.id == Profession_id))
+    cls = result.scalar_one_or_none()
+    if not cls:
+        raise HTTPException(status_code=404, detail="professions not found")
+    return cls
+
+@router.post("/", response_model=ProfessionRead, status_code=201)
+async def create_Profession(cls: ProfessionCreate, db: AsyncSession = Depends(get_db)):
+    """
+    Добавить новый класс (для тестов/seed).
+    """
+    new_cls = ProfessionModel(
+        name=cls.name,
+        hit_die=cls.hit_die,
+        strength_bonus=cls.strength_bonus,
+        dexterity_bonus=cls.dexterity_bonus,
+        constitution_bonus=cls.constitution_bonus,
+        intelligence_bonus=cls.intelligence_bonus,
+        wisdom_bonus=cls.wisdom_bonus,
+        charisma_bonus=cls.charisma_bonus,
+    )
+    db.add(new_cls)
+    await db.commit()
+    await db.refresh(new_cls)
+    return new_cls
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\routers\races.py ===
+from fastapi import APIRouter, Depends, HTTPException, status
+from typing import List
+
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+
+from app.database import get_db
+from app.models.race import Race as RaceModel
+from app.schemas.race import RaceCreate, RaceRead
+
+router = APIRouter(
+    prefix="/races",
+    tags=["Races"]
+)
+
+@router.get("/", response_model=List[RaceRead])
+async def list_races(db: AsyncSession = Depends(get_db)):
+    """
+    Вернуть список всех рас с их бонусами, штрафами и расширенными полями.
+    """
+    result = await db.execute(select(RaceModel))
+    races = result.scalars().all()
+    return races
+
+@router.get("/{race_id}", response_model=RaceRead)
+async def get_race(race_id: int, db: AsyncSession = Depends(get_db)):
+    """
+    Вернуть детали конкретной расы по ее ID.
+    """
+    result = await db.execute(select(RaceModel).where(RaceModel.id == race_id))
+    race = result.scalar_one_or_none()
+    if not race:
+        raise HTTPException(status_code=404, detail="Race not found")
+    return race
+
+@router.post("/", response_model=RaceRead, status_code=201)
+async def create_race(race: RaceCreate, db: AsyncSession = Depends(get_db)):
+    """
+    Добавить новую расу с расширенными параметрами.
+    """
+    new_race = RaceModel(
+        name=race.name,
+        strength_bonus=race.strength_bonus,
+        dexterity_bonus=race.dexterity_bonus,
+        constitution_bonus=race.constitution_bonus,
+        intelligence_bonus=race.intelligence_bonus,
+        wisdom_bonus=race.wisdom_bonus,
+        charisma_bonus=race.charisma_bonus,
+
+        # Новые поля:
+        extra_hp=race.extra_hp,
+        movement_speed=race.movement_speed,
+        night_vision=race.night_vision,
+        resistances=race.resistances,
+        languages=race.languages,
+        traits=race.traits,
+    )
+    db.add(new_race)
+    await db.commit()
+    await db.refresh(new_race)
+    return new_race
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\routers\sessions.py ===
+from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.database import get_db
+from app.schemas.session import SessionCreate, SessionRead, SessionUpdate
+from app.services.session_service import (
+    get_all_sessions,
+    get_session_by_id,
+    create_session,
+    update_session,
+    delete_session
+)
+
+router = APIRouter(
+    prefix="/sessions",
+    tags=["Sessions"]
+)
+
+@router.get("/", response_model=list[SessionRead])
+async def list_sessions(db: AsyncSession = Depends(get_db)):
+    return await get_all_sessions(db)
+
+@router.get("/{session_id}", response_model=SessionRead)
+async def read_session(session_id: int, db: AsyncSession = Depends(get_db)):
+    return await get_session_by_id(session_id, db)
+
+@router.post("/", response_model=SessionRead, status_code=201)
+async def add_session(data: SessionCreate, db: AsyncSession = Depends(get_db)):
+    return await create_session(data, db)
+
+@router.put("/{session_id}", response_model=SessionRead)
+async def edit_session(session_id: int, data: SessionUpdate, db: AsyncSession = Depends(get_db)):
+    return await update_session(session_id, data, db)
+
+@router.delete("/{session_id}", status_code=204)
+async def remove_session(session_id: int, db: AsyncSession = Depends(get_db)):
+    await delete_session(session_id, db)
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\routers\theme.py ===
+from fastapi import APIRouter, Depends
+from typing import List
+from app.schemas.theme import Theme
+from app.dependencies.db import FakeDatabase, get_db
+
+router = APIRouter(
+    prefix="/themes",
+    tags=["themes"]
+)
+
+@router.get("/", response_model=List[Theme])
+def get_themes(db: FakeDatabase = Depends(get_db)):
+    return db.list_themes()
+
+@router.post("/", response_model=Theme)
+def create_theme(theme: Theme, db: FakeDatabase = Depends(get_db)):
+    return db.create_theme(theme)
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\schemas\ability.py ===
+from pydantic import BaseModel, Field
+from typing import Optional, List, Dict, Any, Union
+
+class AbilityBase(BaseModel):
+    name: str = Field(..., description="Название способности")
+    description: Optional[str] = Field("", description="Описание")
+    cooldown: float = Field(0.0, description="Время перезарядки в секундах")
+    
+    # Условия активации: объект или список объектов
+    activation_condition: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = Field(
+        None, 
+        description=(
+            "Условия вызова абилки, можно передать JSON-объект или массив JSON-объектов, например:"
+            "[{ 'requires_shards': {'white':1} }, { 'uses_per_long_rest':1 }]")
+    )
+
+    model_config = {"from_attributes": True}
+
+class AbilityCreate(AbilityBase):
+    allowed_race_names: Optional[List[str]] = Field(
+        default_factory=list,
+        description="Названия рас, которым доступна способность"
+    )
+    allowed_profession_names: Optional[List[str]] = Field(
+        default_factory=list,
+        description="Названия классов, которым доступна способность"
+    )
+    character_ids: Optional[List[int]] = Field(
+        default_factory=list,
+        description="ID персонажей, кому выдать способность"
+    )
+
+
+class AbilityUpdate(BaseModel):
+    name: Optional[str] = Field(None, description="Новое название способности")
+    description: Optional[str] = Field(None, description="Новое описание")
+    cooldown: Optional[float] = Field(None, description="Новое значение перезарядки")
+    allowed_race_names: Optional[List[str]] = Field(
+        default=None,
+        description="Обновлённый список рас по названиям"
+    )
+    allowed_profession_names: Optional[List[str]] = Field(
+        default=None,
+        description="Обновлённый список классов по названиям"
+    )
+    character_ids: Optional[List[int]] = Field(
+        default=None,
+        description="Список ID персонажей для связи"
+    )
+
+    activation_condition: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = Field(None, description="Новые условия вызова абилки")
+    model_config = {"from_attributes": True}
+
+class AbilityRead(AbilityBase):
+    id: int = Field(..., description="ID способности")
+    allowed_races: List[str] = Field(default_factory=list, description="Названия рас, которым доступна способность")
+    allowed_professions: List[str] = Field(default_factory=list, description="Названия классов, которым доступна способность")
+    character_ids: List[int] = Field(default_factory=list, description="ID персонажей, у которых есть способность")
+
+    activation_condition: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = Field(None, description="Условия вызова абилки")
+    model_config = {"from_attributes": True}
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\schemas\character.py ===
+from pydantic import BaseModel, Field
+from typing import Optional, List, Dict
+
+from app.schemas.ability import AbilityRead
+from app.schemas.race import RaceRead
+from app.schemas.profession import ProfessionRead
+from app.schemas.level import LevelRead
+from app.schemas.inventory import InventoryItemRead
+
+class CharacterBase(BaseModel):
+    name: str = Field(..., description="Имя персонажа")
+
+    # ← «финальные» статы, которые присылает фронтенд
+    hp: int = Field(..., description="Итоговое значение ХП после всех бонусов")
+    armor: int = Field(..., description="Итоговое значение Класса Брони после всех бонусов")
+
+    strength: int = Field(..., description="Показатель Силы")
+    dexterity: int = Field(..., description="Показатель Ловкости")
+    constitution: int = Field(..., description="Показатель Телосложения")
+    intelligence: int = Field(..., description="Показатель Интеллекта")
+    wisdom: int = Field(..., description="Показатель Мудрости")
+    charisma: int = Field(..., description="Показатель Харизмы")
+
+    race_id: int = Field(..., description="ID расы (из списка /races)")
+    profession_id: int = Field(..., description="ID профессии/класса (из списка /professions)")
+    level_id: int = Field(..., description="ID уровня (из списка /levels)")
+
+    is_npc: bool = Field(default=False, description="Является ли NPC")
+    avatar_url: Optional[str] = Field(None, description="URL аватара персонажа")
+
+    shards: Dict[str, int] = Field(
+        default_factory=lambda: {
+            "red": 0,
+            "green": 0,
+            "blue": 0,
+            "black": 0,
+            "white": 0
+        },
+        description="Осколки пяти"
+    )
+
+class CharacterCreate(CharacterBase):
+    ability_ids: Optional[List[int]] = Field(
+        default_factory=list,
+        description="Список ID способностей для присвоения"
+    )
+    session_id: Optional[int] = Field(None, description="ID сессии, если персонаж участвует")
+
+class CharacterUpdate(BaseModel):
+    name: Optional[str] = Field(None, description="Новое имя персонажа")
+    session_id: Optional[int] = Field(None, description="Обновлённый ID сессии")
+
+    hp: Optional[int] = Field(None, description="Итоговое значение ХП после всех бонусов")
+    armor: Optional[int] = Field(None, description="Итоговое значение Класса Брони после всех бонусов")
+
+    strength: Optional[int] = Field(None, description="Показатель Силы")
+    dexterity: Optional[int] = Field(None, description="Показатель Ловкости")
+    constitution: Optional[int] = Field(None, description="Показатель Телосложения")
+    intelligence: Optional[int] = Field(None, description="Показатель Интеллекта")
+    wisdom: Optional[int] = Field(None, description="Показатель Мудрости")
+    charisma: Optional[int] = Field(None, description="Показатель Харизмы")
+
+    race_id: Optional[int] = Field(None, description="ID расы (из списка /races)")
+    profession_id: Optional[int] = Field(None, description="ID класса (из списка /professions)")
+    level_id: Optional[int] = Field(None, description="ID уровня (из списка /levels)")
+
+    ability_ids: Optional[List[int]] = Field(
+        None,
+        alias="abilities",
+        description="Список ID способностей",
+    )
+    is_npc: Optional[bool] = Field(None, description="Является ли NPC")
+    avatar_url: Optional[str] = Field(None, description="URL аватара персонажа")
+
+    shards: Optional[Dict[str, int]] = Field(
+        None,
+        description="Осколки всех пяти цветов"
+    ) # осколки - универсальная механика и основа лора.
+
+class CharacterRead(BaseModel):
+    id: int = Field(..., description="ID персонажа")
+    name: str = Field(..., description="Имя персонажа")
+    player_id: Optional[int] = Field(None, description="ID владельца персонажа (игрока)")
+    session_id: Optional[int] = Field(None, description="ID сессии, в которой участвует персонаж")
+
+    race: RaceRead = Field(..., description="Данные расы персонажа")
+    profession: ProfessionRead = Field(..., description="Данные профессии (класса) персонажа")
+    level: LevelRead = Field(..., description="Данные уровня персонажа")
+
+    hp: int = Field(..., description="Финальное значение ХП")
+    armor: int = Field(..., description="Финальное значение AC (класса брони)")
+    shards: Dict[str, int] = Field(..., description="Количество осколков по цветам")
+    
+    strength: int = Field(..., description="Финальное значение Силы")
+    dexterity: int = Field(..., description="Финальное значение Ловкости")
+    constitution: int = Field(..., description="Финальное значение Телосложения")
+    intelligence: int = Field(..., description="Финальное значение Интеллекта")
+    wisdom: int = Field(..., description="Финальное значение Мудрости")
+    charisma: int = Field(..., description="Финальное значение Харизмы")
+
+    is_npc: bool = Field(..., description="Флаг: является ли персонаж NPC")
+    avatar_url: Optional[str] = Field(None, description="URL аватара персонажа (если задан)")
+
+    abilities: List[AbilityRead] = Field(default_factory=list, description="Список способностей персонажа")
+    inventory_items: List[InventoryItemRead] = Field(default_factory=list, description="Инвентарь персонажа")
+
+    class Config:
+        orm_mode = True
+        model_config = {"from_attributes": True}
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\schemas\effect.py ===
+from pydantic import BaseModel, Field
+from typing import Literal, Optional
+
+class EffectBase(BaseModel):
+    target_type: Literal["character", "session"] = Field(..., description="Тип цели эффекта")
+    target_id:   int                             = Field(..., description="ID цели эффекта")
+    name:        str                             = Field(..., description="Название эффекта")
+    duration:    float                           = Field(0.0, description="Длительность эффекта в секундах")
+
+class EffectUpdate(BaseModel):
+    name:        Optional[str]     = Field(None, description="Новое имя эффекта")
+    duration:    Optional[float]   = Field(None, description="Новая длительность в секундах")
+    # Можно также позволить менять target_type/target_id, если нужно:
+    target_type: Optional[Literal["character","session"]] = None
+    target_id:   Optional[int]     = None
+
+class EffectCreate(EffectBase):
+    """Используется при POST /effects/"""
+    pass
+
+class EffectRead(EffectBase):
+    id: int = Field(..., description="Уникальный ID эффекта")
+
+    class Config:
+        from_attributes = True
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\schemas\event_instance.py ===
+from pydantic import BaseModel
+from datetime import datetime
+from typing import Optional, Dict, Any
+
+class EventInstanceBase(BaseModel):
+    session_id: int
+    template_id: int
+    timestamp: datetime
+    data: Optional[Dict[str, Any]] = None  # Дополнительные данные события
+
+class EventInstanceCreate(EventInstanceBase):
+    pass
+
+class EventInstance(EventInstanceBase):
+    id: int
+
+    class Config:
+        from_attributes = True
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\schemas\event_template.py ===
+from pydantic import BaseModel, Field
+from typing import Optional, Dict, Any
+
+class EventTemplateBase(BaseModel):
+    name: str = Field(..., description="Короткое название события")
+    description: Optional[str] = None
+    parameters: Optional[Dict[str, Any]] = None  # можно передавать любые данные
+
+class EventTemplateCreate(EventTemplateBase):
+    pass
+
+class EventTemplateUpdate(BaseModel):
+    name: Optional[str] = Field(None, description="Короткое название события")
+    description: Optional[str] = None
+    parameters: Optional[Dict[str, Any]] = None
+
+class EventTemplateRead(EventTemplateBase):
+    id: int = Field(..., description="Уникальный ID шаблона события")
+
+    class Config:
+        from_attributes = True
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\schemas\inventory.py ===
+# app/schemas/inventory.py
+
+from pydantic import BaseModel, Field
+from typing import List
+
+from app.schemas.item import ItemRead  # DTO вашего предмета
+
+class InventoryBase(BaseModel):
+    character_id: int = Field(..., description="ID персонажа")
+    item_id: int = Field(..., description="ID предмета")
+    quantity: int = Field(1, description="Количество предметов")
+    equipped: bool = Field(False, description="Надето ли (True) или лежит в рюкзаке (False)")
+
+class InventoryCreate(InventoryBase):
+    pass
+
+class InventoryItemRead(BaseModel):
+    id: int = Field(..., description="ID записи в таблице inventory")
+    quantity: int = Field(..., description="Количество данного предмета")
+    equipped: bool = Field(..., description="Надет ли предмет")
+    item: ItemRead = Field(..., description="Детали предмета")
+
+    class Config:
+        orm_mode = True
+        model_config = {"from_attributes": True}
+
+class InventoryGroup(BaseModel):
+    id: int = Field(..., description="ID группы (совпадает с character_id)")
+    character_id: int = Field(..., description="ID персонажа")
+    items: List[InventoryItemRead] = Field(
+        default_factory=list,
+        description="Список вещей с вложенными данными предметов"
+    )
+
+    class Config:
+        orm_mode = True
+        model_config = {"from_attributes": True}
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\schemas\item.py ===
+from pydantic import BaseModel
+from typing import Optional, Dict, Any
+
+class ItemBase(BaseModel):
+    name: str
+    description: Optional[str] = None
+    weight: float = 0.0
+    properties: Dict[str, Any] = {}
+
+class ItemCreate(ItemBase):
+    pass
+
+class ItemRead(ItemBase):
+    id: int
+
+    class Config:
+        from_attributes = True
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\schemas\level.py ===
+from pydantic import BaseModel, Field
+
+class LevelBase(BaseModel):
+    hp_increase: int = Field(..., description="Сколько HP добавляется при достижении этого уровня")
+    bonus_attribute: str = Field(None, description="Какой атрибут можно улучшить (+1)")
+    description: str = Field("", description="Текстовое описание бонусов уровня")
+
+class LevelCreate(LevelBase):
+    id: int = Field(..., description="Номер уровня")  # Например, 1, 2, 3
+
+class LevelRead(LevelBase):
+    id: int = Field(..., description="Уникальный идентификатор уровня (сам номер уровня)")
+
+    class Config:
+        orm_mode = True
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\schemas\map.py ===
+from pydantic import BaseModel, Field
+from typing import Optional, Dict, Any
+
+class MapBase(BaseModel):
+    name: str = Field(..., description="Название карты")
+    image_url: str = Field(..., description="URL изображения карты")
+    layout: Optional[Dict[str, Any]] = Field(
+        None, description="Структура карты в формате JSON (например, тайлы, сетка)"
+    )
+
+class MapCreate(MapBase):
+    pass
+
+class MapRead(MapBase):
+    id: int = Field(..., description="Уникальный ID карты")
+
+    class Config:
+        from_attributes = True
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\schemas\map_object.py ===
+from pydantic import BaseModel, Field
+from typing import Optional, Dict, Any
+
+class MapObjectBase(BaseModel):
+    name: str = Field(..., description="Название объекта на карте")
+    type: str = Field(..., description="Тип объекта (например, 'стена', 'дверь', 'ловушка')")
+    position: Dict[str, int] = Field(..., description="Позиция объекта на карте: {'x': int, 'y': int}")
+    properties: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Дополнительные свойства объекта (например, состояние, взаимодействие)"
+    )
+
+class MapObjectCreate(MapObjectBase):
+    map_id: int = Field(..., description="ID карты, к которой привязан объект")
+
+class MapObjectRead(MapObjectBase):
+    id: int = Field(..., description="Уникальный ID объекта")
+    map_id: int = Field(..., description="ID карты, к которой привязан объект")
+
+    class Config:
+        from_attributes = True
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\schemas\npc.py ===
+from pydantic import BaseModel, Field
+from typing import Optional
+
+class NPCCreate(BaseModel):
+    name: str = Field(..., description="Имя NPC")
+    race: str = Field(..., description="Раса NPC")
+    profession: str = Field(..., description="Профессия или роль NPC")
+    level: int = Field(1, description="Уровень NPC")
+
+class NPCUpdate(BaseModel):
+    name: Optional[str] = Field(None, description="Имя NPC")
+    race: Optional[str] = Field(None, description="Раса NPC")
+    profession: Optional[str] = Field(None, description="Профессия или роль NPC")
+    level: Optional[int] = Field(None, description="Уровень NPC")
+
+class NPCRead(NPCCreate):
+    id: int = Field(..., description="ID NPC")
+
+    class Config:
+        from_attributes = True
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\schemas\player.py ===
+from pydantic import BaseModel, Field
+from typing import Optional
+
+# --------------------------------------------
+# PlayerCreate/PlayerUpdate/PlayerRead схемы
+# --------------------------------------------
+
+class PlayerBase(BaseModel):
+    """
+    Базовая схема для Player: общие поля.
+    """
+    telegram_id: int = Field(..., description="Telegram ID игрока")
+    name: str = Field(..., description="Имя игрока")
+    username: Optional[str] = Field(None, description="Username Telegram (если есть)")
+    role: Optional[str] = Field("player", description="Роль аккаунта: 'player' или 'master'")
+    active_as: Optional[str] = Field("player", description="Текущий режим: 'player' или 'master'")
+
+    model_config = {
+        "from_attributes": True  # чтобы модель могла читать атрибуты из SQLAlchemy-объекта
+    }
+
+class PlayerUpdate(BaseModel):
+    """
+    Схема для обновления Player.
+    Можно передавать любую комбинацию полей для изменения.
+    """
+    telegram_id: Optional[int] = Field(None, description="Telegram ID игрока")
+    name: Optional[str] = Field(None, description="Имя игрока")
+    username: Optional[str] = Field(None, description="Username Telegram (если есть)")
+    role: Optional[str] = Field(None, description="Роль аккаунта: 'player' или 'master'")
+    active_as: Optional[str] = Field(None, description="Текущий режим: 'player' или 'master'")
+
+    model_config = {
+        "from_attributes": True
+    }
+
+class PlayerRead(PlayerBase):
+    """
+    Схема для чтения Player. Все поля обязательны в ответе, включая id.
+    """
+    id: int = Field(..., description="ID игрока в базе")
+
+    model_config = {
+        "from_attributes": True
+    }
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\schemas\profession.py ===
+from pydantic import BaseModel, Field
+
+class ProfessionBase(BaseModel):
+    name: str = Field(..., description="Название класса (Fighter, Rogue, и т. д.)")
+    hit_die: int = Field(8, description="lый куб здоровья, который даёт класс (например, 10 для Fighter)")
+    strength_bonus: int = Field(0, description="Бонус к Силе")
+    dexterity_bonus: int = Field(0, description="Бонус к Ловкости")
+    constitution_bonus: int = Field(0, description="Бонус к Телосложению")
+    intelligence_bonus: int = Field(0, description="Бонус к Интеллекту")
+    wisdom_bonus: int = Field(0, description="Бонус к Мудрости")
+    charisma_bonus: int = Field(0, description="Бонус к Харизме")
+
+class ProfessionCreate(ProfessionBase):
+    pass
+
+class ProfessionRead(ProfessionBase):
+    id: int = Field(..., description="ID класса")
+
+    class Config:
+        orm_mode = True
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\schemas\race.py ===
+from pydantic import BaseModel, Field
+from typing import List
+
+class RaceBase(BaseModel):
+    name: str = Field(..., description="Название расы")
+
+    strength_bonus: int = Field(0, description="Бонус к Силе")
+    dexterity_bonus: int = Field(0, description="Бонус к Ловкости")
+    constitution_bonus: int = Field(0, description="Бонус к Телосложению")
+    intelligence_bonus: int = Field(0, description="Бонус к Интеллекту")
+    wisdom_bonus: int = Field(0, description="Бонус к Мудрости")
+    charisma_bonus: int = Field(0, description="Бонус к Харизме")
+
+    # Новые поля:
+    extra_hp: int = Field(2, description="Дополнительное HP (на старте и при каждом уровне)")
+    movement_speed: int = Field(30, description="Скорость перемещения (в футах)")
+    night_vision: bool = Field(False, description="Ночное зрение (True/False)")
+    resistances: List[str] = Field(default_factory=list, description="Устойчивости, пример: ['fire']")
+    languages: List[str] = Field(default_factory=list, description="Известные языки, пример: ['Common', 'Elvish']")
+    traits: List[str] = Field(default_factory=list, description="Уникальные черты (пассивки), пример: ['Lucky', 'Brave']")
+
+class RaceCreate(RaceBase):
+    pass
+
+class RaceRead(RaceBase):
+    id: int = Field(..., description="ID расы")
+
+    class Config:
+        orm_mode = True
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\schemas\session.py ===
+from pydantic import BaseModel
+from datetime import datetime
+
+class SessionBase(BaseModel):
+    name: str
+    description: str | None = None
+
+class SessionCreate(SessionBase):
+    pass
+
+class SessionRead(SessionBase):
+    id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class SessionUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\schemas\theme.py ===
+from pydantic import BaseModel
+from typing import Dict
+
+class Theme(BaseModel):
+    id: int
+    name: str
+    colors: Dict[str, str]
+    icons_path: str
+    map_filters: Dict[str, str]
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\seed\abilities.py ===
+# app/seed/abilities.py
+
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from app.models.ability import Ability
+from app.models.race import Race
+from app.models.profession import Profession
+
+async def seed_abilities(db: AsyncSession):
+    """
+    Создаёт 12 базовых способностей (Ability) и сразу устанавливает:
+    - связи к Race (какие расы могут выбрать эту способность),
+    - связи к Profession (какие классы её получают/могут выбрать).
+    """
+    # Определяем список всех способностей и их «правила доступа»
+    ability_seeds = [
+        {
+            "name": "Rage",
+            "description": "Barbarian enters a furious rage, получая бонусы к оружейным атакам и сопротивлению урону.",
+            "cooldown": 0.0,
+            "activation_condition": {},
+            "allowed_race_names": [],  # доступно всем расам
+            "allowed_profession_names": ["Barbarian"]
+        },
+        {
+            "name": "Sneak Attack",
+            "description": "Rogue наносит дополнительный урон, когда атакует с преимуществом или союзник рядом.",
+            "cooldown": 0.0,
+            "activation_condition": {},
+            "allowed_race_names": [],
+            "allowed_profession_names": ["Rogue"]
+        },
+        {
+            "name": "Spellcasting",
+            "description": "Permits casting class spells (Wizard/Cleric/Druid/Bard/Warlock/Sorcerer).",
+            "cooldown": 0.0,
+            "activation_condition": {},
+            "allowed_race_names": [],
+            "allowed_profession_names": ["Wizard", "Cleric", "Druid", "Bard", "Warlock", "Sorcerer"]
+        },
+        {
+            "name": "Action Surge",
+            "description": "Fighter получает дополнительное действие один раз за короткий отдых.",
+            "cooldown": 0.0,
+            "activation_condition": {},
+            "allowed_race_names": [],
+            "allowed_profession_names": ["Fighter"]
+        },
+        {
+            "name": "Divine Smite",
+            "description": "Paladin тратит ячейку заклинания, чтобы нанести дополнительный святой урон.",
+            "cooldown": 0.0,
+            "activation_condition": {},
+            "allowed_race_names": [],
+            "allowed_profession_names": ["Paladin"]
+        },
+        {
+            "name": "Channel Divinity",
+            "description": "Cleric получает особую способность, зависящую от выбранного Домена.",
+            "cooldown": 0.0,
+            "activation_condition": {},
+            "allowed_race_names": [],
+            "allowed_profession_names": ["Cleric"]
+        },
+        {
+            "name": "Wild Shape",
+            "description": "Druid может превращаться в животное дважды в короткий отдых.",
+            "cooldown": 0.0,
+            "activation_condition": {},
+            "allowed_race_names": [],
+            "allowed_profession_names": ["Druid"]
+        },
+        {
+            "name": "Bardic Inspiration",
+            "description": "Bard дает союзнику кубик вдохновения для бросков искушений или сохранений.",
+            "cooldown": 0.0,
+            "activation_condition": {},
+            "allowed_race_names": [],
+            "allowed_profession_names": ["Bard"]
+        },
+        {
+            "name": "Evasion",
+            "description": "Rogue или Monk получает половину урона от эффектов, требующих спасбросок Ловкости.",
+            "cooldown": 0.0,
+            "activation_condition": {},
+            "allowed_race_names": [],
+            "allowed_profession_names": ["Rogue", "Monk"]
+        },
+        {
+            "name": "Ki Strike",
+            "description": "Monk наносит дополнительные удары ки, повышая урон.",
+            "cooldown": 0.0,
+            "activation_condition": {},
+            "allowed_race_names": [],
+            "allowed_profession_names": ["Monk"]
+        },
+        {
+            "name": "Second Wind",
+            "description": "Fighter восстанавливает немного HP как бонусное действие.",
+            "cooldown": 0.0,
+            "activation_condition": {},
+            "allowed_race_names": [],
+            "allowed_profession_names": ["Fighter"]
+        },
+        {
+            "name": "Arcane Recovery",
+            "description": "Wizard восстанавливает часть ячеек заклинаний при коротком отдыхе.",
+            "cooldown": 0.0,
+            "activation_condition": {},
+            "allowed_race_names": [],
+            "allowed_profession_names": ["Wizard"]
+        },
+        {
+            "name": "УДАР ДУРАКА",
+            "description": "ЕСЛИ ТЫ ДУРАК - УДАРЬ КАК ДУРАК",
+            "cooldown": 0.0,
+            "activation_condition": {},
+            "allowed_race_names": ["Orc", "Gnome"],
+            "allowed_profession_names": [] # доступно всем классам
+        },
+        {
+            "name": "Взрыв энергии",
+            "description": "Создаёт мощную волну, наносящую урон всем вокруг.",
+            "cooldown": 60.0,
+            "activation_condition": {"requires_shards": {"red": 1}, "uses_per_long_rest": 2},
+            "allowed_race_names": [],            # ← ОБЯЗАТЕЛЬНО
+            "allowed_profession_names": []       # ← ОБЯЗАТЕЛЬНО
+        },
+        {
+            "name": "Усиленная регенерация",
+            "description": "Увеличивает восстановление HP вдвое на 1 минуту.",
+            "cooldown": 120.0,
+            "activation_condition": {"requires_shards": {"green": 1}, "uses_per_long_rest": 1},
+            "allowed_race_names": [],
+            "allowed_profession_names": []
+        },
+        {
+            "name": "Ускорение времени",
+            "description": "Действия персонажа ускоряются на 10 секунд.",
+            "cooldown": 90.0,
+            "activation_condition": {"requires_shards": {"blue": 1}, "uses_per_long_rest": 2},
+            "allowed_race_names": [],
+            "allowed_profession_names": []
+        },
+        {
+            "name": "Теневой скачок",
+            "description": "Телепорт на 15 метров.",
+            "cooldown": 45.0,
+            "activation_condition": {"requires_shards": {"black": 1}, "uses_per_long_rest": 2, "range_meters": 15},
+            "allowed_race_names": [],
+            "allowed_profession_names": []
+        },
+        {
+            "name": "Призыв чистоты",
+            "description": "Очистка всех негативных эффектов и восстановление 5 HP.",
+            "cooldown": 300.0,
+            "activation_condition": {"requires_shards": {"white": 1}, "uses_per_long_rest": 1},
+            "allowed_race_names": [],
+            "allowed_profession_names": []
+        },
+    ]
+
+    for a in ability_seeds:
+        # Проверяем, есть ли уже Ability с таким именем
+        stmt = await db.execute(select(Ability).where(Ability.name == a["name"]))
+        existing = stmt.scalar_one_or_none()
+        if existing:
+            continue
+
+        # Если нет — создаём новую Ability
+        ability = Ability(
+            name=a["name"],
+            description=a["description"],
+            cooldown=a["cooldown"],
+            activation_condition=a.get("activation_condition")
+        )
+
+        # Связываем с расами (если указаны по имени)
+        if a["allowed_race_names"]:
+            stmt_r = await db.execute(
+                select(Race).where(Race.name.in_(a["allowed_race_names"]))
+            )
+            ability.races = stmt_r.scalars().all()
+
+        # Связываем с профессиями (если указаны по имени)
+        if a["allowed_profession_names"]:
+            stmt_p = await db.execute(
+                select(Profession).where(Profession.name.in_(a["allowed_profession_names"]))
+            )
+            ability.professions = stmt_p.scalars().all()
+
+        db.add(ability)
+
+    await db.commit()
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\seed\levels.py ===
+# app/seed/levels.py
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from app.models.level import Level
+
+async def seed_levels(db: AsyncSession):
+    for lvl in range(1, 21): # D&D обычно от 1 до 20 уровня
+        exists = await db.execute(select(Level).where(Level.id == lvl))
+        if not exists.scalar_one_or_none():
+            db.add(Level(id=lvl, hp_increase=5, bonus_attribute="None", description=""))
+    await db.commit()
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\seed\professions.py ===
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from app.models.profession import Profession
+
+async def seed_professions(db: AsyncSession):
+    """
+    Канонические классы (профессии) и их бонусы (D&D 5e).
+    Выполняет INSERT только если профессия с таким именем ещё не существует.
+    """
+    professions = [
+        {"name": "Barbarian", "hit_die": 12, "strength_bonus": 2, "dexterity_bonus": 0, "constitution_bonus": 2, "intelligence_bonus": 0, "wisdom_bonus": 0, "charisma_bonus": 0},
+        {"name": "Bard",      "hit_die": 8,  "strength_bonus": 0, "dexterity_bonus": 0, "constitution_bonus": 0, "intelligence_bonus": 0, "wisdom_bonus": 0, "charisma_bonus": 2},
+        {"name": "Cleric",    "hit_die": 8,  "strength_bonus": 0, "dexterity_bonus": 0, "constitution_bonus": 0, "intelligence_bonus": 0, "wisdom_bonus": 2, "charisma_bonus": 0},
+        {"name": "Druid",     "hit_die": 8,  "strength_bonus": 0, "dexterity_bonus": 0, "constitution_bonus": 0, "intelligence_bonus": 0, "wisdom_bonus": 2, "charisma_bonus": 0},
+        {"name": "Fighter",   "hit_die": 10, "strength_bonus": 0, "dexterity_bonus": 0, "constitution_bonus": 0, "intelligence_bonus": 0, "wisdom_bonus": 0, "charisma_bonus": 0},
+        {"name": "Monk",      "hit_die": 8,  "strength_bonus": 0, "dexterity_bonus": 2, "constitution_bonus": 0, "intelligence_bonus": 0, "wisdom_bonus": 1, "charisma_bonus": 0},
+        {"name": "Paladin",   "hit_die": 10, "strength_bonus": 0, "dexterity_bonus": 0, "constitution_bonus": 0, "intelligence_bonus": 0, "wisdom_bonus": 0, "charisma_bonus": 1},
+        {"name": "Ranger",    "hit_die": 10, "strength_bonus": 0, "dexterity_bonus": 1, "constitution_bonus": 0, "intelligence_bonus": 0, "wisdom_bonus": 1, "charisma_bonus": 0},
+        {"name": "Rogue",     "hit_die": 8,  "strength_bonus": 0, "dexterity_bonus": 2, "constitution_bonus": 0, "intelligence_bonus": 1, "wisdom_bonus": 0, "charisma_bonus": 0},
+        {"name": "Sorcerer",  "hit_die": 6,  "strength_bonus": 0, "dexterity_bonus": 0, "constitution_bonus": 0, "intelligence_bonus": 0, "wisdom_bonus": 0, "charisma_bonus": 2},
+        {"name": "Warlock",   "hit_die": 8,  "strength_bonus": 0, "dexterity_bonus": 0, "constitution_bonus": 0, "intelligence_bonus": 0, "wisdom_bonus": 0, "charisma_bonus": 2},
+        {"name": "Wizard",    "hit_die": 6,  "strength_bonus": 0, "dexterity_bonus": 0, "constitution_bonus": 0, "intelligence_bonus": 2, "wisdom_bonus": 0, "charisma_bonus": 0},
+    ]
+
+    for prof_data in professions:
+        stmt = await db.execute(select(Profession).where(Profession.name == prof_data["name"]))
+        existing = stmt.scalar_one_or_none()
+        if not existing:
+            db.add(Profession(**prof_data))
+
+    await db.commit()
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\seed\races.py ===
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from app.models.race import Race
+
+async def seed_races(db: AsyncSession):
+    """
+    Канонические расы и их бонусы (D&D 5e).
+    Выполняет INSERT только если раса с таким именем ещё не существует.
+    """
+    races = [
+        {"name": "Human",           "strength_bonus": 1, "dexterity_bonus": 1, "constitution_bonus": 1, "intelligence_bonus": 1, "wisdom_bonus": 1, "charisma_bonus": 1},
+        {"name": "Elf",             "strength_bonus": 0, "dexterity_bonus": 2, "constitution_bonus": 0, "intelligence_bonus": 1, "wisdom_bonus": 0, "charisma_bonus": 0},
+        {"name": "High Elf",        "strength_bonus": 0, "dexterity_bonus": 2, "constitution_bonus": 0, "intelligence_bonus": 1, "wisdom_bonus": 0, "charisma_bonus": 0},
+        {"name": "Dwarf",           "strength_bonus": 0, "dexterity_bonus": 0, "constitution_bonus": 2, "intelligence_bonus": 0, "wisdom_bonus": 1, "charisma_bonus": 0},
+        {"name": "Hill Dwarf",      "strength_bonus": 0, "dexterity_bonus": 0, "constitution_bonus": 2, "intelligence_bonus": 0, "wisdom_bonus": 1, "charisma_bonus": 0},
+        {"name": "Mountain Dwarf",  "strength_bonus": 2, "dexterity_bonus": 0, "constitution_bonus": 2, "intelligence_bonus": 0, "wisdom_bonus": 0, "charisma_bonus": 0},
+        {"name": "Halfling",        "strength_bonus": 0, "dexterity_bonus": 2, "constitution_bonus": 0, "intelligence_bonus": 0, "wisdom_bonus": 0, "charisma_bonus": 1},
+        {"name": "Gnome",           "strength_bonus": 0, "dexterity_bonus": 0, "constitution_bonus": 0, "intelligence_bonus": 2, "wisdom_bonus": 0, "charisma_bonus": 0},
+        {"name": "Half-Elf",        "strength_bonus": 0, "dexterity_bonus": 0, "constitution_bonus": 0, "intelligence_bonus": 0, "wisdom_bonus": 0, "charisma_bonus": 2},
+        {"name": "Half-Orc",        "strength_bonus": 2, "dexterity_bonus": 0, "constitution_bonus": 1, "intelligence_bonus": 0, "wisdom_bonus": 0, "charisma_bonus": 0},
+        {"name": "Tiefling",        "strength_bonus": 0, "dexterity_bonus": 0, "constitution_bonus": 0, "intelligence_bonus": 1, "wisdom_bonus": 0, "charisma_bonus": 2},
+        {"name": "Dragonborn",      "strength_bonus": 2, "dexterity_bonus": 0, "constitution_bonus": 0, "intelligence_bonus": 0, "wisdom_bonus": 0, "charisma_bonus": 1},
+        {"name": "Orc",             "strength_bonus": 2, "dexterity_bonus": 1, "constitution_bonus": 1, "intelligence_bonus": 0, "wisdom_bonus": 0, "charisma_bonus": 0},
+    ]
+
+    for race_data in races:
+        stmt = await db.execute(select(Race).where(Race.name == race_data["name"]))
+        existing = stmt.scalar_one_or_none()
+        if not existing:
+            db.add(Race(**race_data))
+
+    await db.commit()
+
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\services\ability_service.py ===
+# app/services/ability_service.py
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+from fastapi import HTTPException
+
+from app.models.ability import Ability as AbilityModel
+from app.models.character import Character as CharacterModel
+from app.models.npc import NPC as NPCModel
+from app.schemas.ability import AbilityCreate, AbilityUpdate
+
+async def list_abilities(db: AsyncSession):
+    result = await db.execute(
+        select(AbilityModel)
+        .options(
+            # optionally load related characters and npcs
+            # selectinload(AbilityModel.characters),
+            # selectinload(AbilityModel.npcs)
+        )
+    )
+    return result.scalars().all()
+
+async def get_ability(ability_id: int, db: AsyncSession):
+    result = await db.execute(select(AbilityModel).where(AbilityModel.id == ability_id))
+    ability = result.scalar_one_or_none()
+    if not ability:
+        raise HTTPException(404, "Ability not found")
+    return ability
+
+async def create_ability(data: AbilityCreate, db: AsyncSession):
+    ability = AbilityModel(
+        name=data.name,
+        description=data.description or "",
+        cooldown=data.cooldown
+    )
+    # привязка к персонажам
+    if data.character_ids:
+        chars = await db.execute(
+            select(CharacterModel).where(CharacterModel.id.in_(data.character_ids))
+        )
+        ability.characters = chars.scalars().all()
+    # привязка к NPC
+    if data.npc_ids:
+        npcs = await db.execute(
+            select(NPCModel).where(NPCModel.id.in_(data.npc_ids))
+        )
+        ability.npcs = npcs.scalars().all()
+    db.add(ability)
+    await db.commit()
+    await db.refresh(ability)
+    return ability
+
+async def update_ability(ability_id: int, data: AbilityUpdate, db: AsyncSession):
+    ability = await get_ability(ability_id, db)
+    # обновление полей
+    for field, value in data.dict(exclude_unset=True, exclude={"character_ids", "npc_ids"}).items():
+        setattr(ability, field, value)
+    # обновление связей
+    if data.character_ids is not None:
+        chars = await db.execute(
+            select(CharacterModel).where(CharacterModel.id.in_(data.character_ids))
+        )
+        ability.characters = chars.scalars().all()
+    if data.npc_ids is not None:
+        npcs = await db.execute(
+            select(NPCModel).where(NPCModel.id.in_(data.npc_ids))
+        )
+        ability.npcs = npcs.scalars().all()
+    await db.commit()
+    await db.refresh(ability)
+    return ability
+
+async def delete_ability(ability_id: int, db: AsyncSession):
+    ability = await get_ability(ability_id, db)
+    await db.delete(ability)
+    await db.commit()
+
+
+=== ФАЙЛ: F:\Prog_pc\Prog\DnD_app\app\services\session_service.py ===
+# app/services/session_service.py
+
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+from fastapi import HTTPException
+
+from app.models.session import Session as SessionModel
+from app.schemas.session import SessionCreate, SessionUpdate
+
+async def get_all_sessions(db: AsyncSession):
+    result = await db.execute(select(SessionModel))
+    return result.scalars().all()
+
+async def get_session_by_id(session_id: int, db: AsyncSession):
+    result = await db.execute(select(SessionModel).where(SessionModel.id == session_id))
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return session
+
+async def create_session(data: SessionCreate, db: AsyncSession):
+    session = SessionModel(name=data.name, description=data.description or "")
+    db.add(session)
+    await db.commit()
+    await db.refresh(session)
+    return session
+
+async def update_session(session_id: int, data: SessionUpdate, db: AsyncSession):
+    session = await get_session_by_id(session_id, db)
+    if data.name is not None:
+        session.name = data.name
+    if data.description is not None:
+        session.description = data.description
+    await db.commit()
+    await db.refresh(session)
+    return session
+
+async def delete_session(session_id: int, db: AsyncSession):
+    session = await get_session_by_id(session_id, db)
+    await db.delete(session)
+    await db.commit()

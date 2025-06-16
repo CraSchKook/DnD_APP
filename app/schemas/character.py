@@ -10,9 +10,9 @@ from app.schemas.inventory import InventoryItemRead
 class CharacterBase(BaseModel):
     name: str = Field(..., description="Имя персонажа")
 
-    # ← «финальные» статы, которые присылает фронтенд
+    # «Финальные» статы, которые присылает фронтенд
     hp: int = Field(..., description="Итоговое значение ХП после всех бонусов")
-    armor: int = Field(..., description="Итоговое значение Класса Брони после всех бонусов")
+    armor: int = Field(..., description="Итоговое значение AC (класса брони) после всех бонусов")
 
     strength: int = Field(..., description="Показатель Силы")
     dexterity: int = Field(..., description="Показатель Ловкости")
@@ -26,7 +26,11 @@ class CharacterBase(BaseModel):
     level_id: int = Field(..., description="ID уровня (из списка /levels)")
 
     is_npc: bool = Field(default=False, description="Является ли NPC")
-    avatar_url: Optional[str] = Field(None, description="URL аватара персонажа")
+
+    image_url: Optional[str] = Field(
+        None,
+        description="URL картинки персонажа/NPC (путь в static/), полученный после загрузки"
+    )
 
     shards: Dict[str, int] = Field(
         default_factory=lambda: {
@@ -40,11 +44,11 @@ class CharacterBase(BaseModel):
     )
 
 class CharacterCreate(CharacterBase):
-    ability_ids: Optional[List[int]] = Field(
+    ability_ids: List[int] = Field(
         default_factory=list,
         description="Список ID способностей для присвоения"
     )
-    session_id: Optional[int] = Field(None, description="ID сессии, если персонаж участвует")
+    session_id: Optional[int] = Field(None, description="ID сессии, если персонаж участвует в сессии")
 
 class CharacterUpdate(BaseModel):
     name: Optional[str] = Field(None, description="Новое имя персонажа")
@@ -70,7 +74,10 @@ class CharacterUpdate(BaseModel):
         description="Список ID способностей",
     )
     is_npc: Optional[bool] = Field(None, description="Является ли NPC")
-    avatar_url: Optional[str] = Field(None, description="URL аватара персонажа")
+    image_url: Optional[str] = Field(
+        None,
+        description="Новый URL картинки персонажа/NPC"
+    )
 
     shards: Optional[Dict[str, int]] = Field(
         None,
@@ -99,7 +106,10 @@ class CharacterRead(BaseModel):
     charisma: int = Field(..., description="Финальное значение Харизмы")
 
     is_npc: bool = Field(..., description="Флаг: является ли персонаж NPC")
-    avatar_url: Optional[str] = Field(None, description="URL аватара персонажа (если задан)")
+    image_url: Optional[str] = Field(
+        None,
+        description="URL картинки персонажа/NPC"
+    )
 
     abilities: List[AbilityRead] = Field(default_factory=list, description="Список способностей персонажа")
     inventory_items: List[InventoryItemRead] = Field(default_factory=list, description="Инвентарь персонажа")

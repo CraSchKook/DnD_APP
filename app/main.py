@@ -28,6 +28,25 @@ from app.seed.professions import seed_professions
 from app.seed.levels import seed_levels
 from app.seed.abilities import seed_abilities
 
+# --- Импорт роутеров ---
+from app.routers.auth import router as auth_router
+from app.routers.players import router as players_router
+from app.routers.sessions import router as sessions_router
+from app.routers.races import router as races_router
+from app.routers.profession import router as professions_router
+from app.routers.levels import router as levels_router
+from app.routers.characters import router as characters_router
+from app.routers.items import router as items_router
+from app.routers.abilities import router as abilities_router
+from app.routers.maps import router as maps_router
+from app.routers.map_objects import router as map_objects_router
+from app.routers.effects import router as effects_router
+from app.routers.event_templates import router as event_templates_router
+from app.routers.inventory import router as inventory_router
+from app.routers.event_instance import router as event_instance_router
+from app.routers.theme import router as theme_router
+from app.routers.upload import router as upload_router  # роут загрузки изображений
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -70,23 +89,6 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 # --- Подключение всех роутеров ---
-from app.routers.auth import router as auth_router
-from app.routers.players import router as players_router
-from app.routers.sessions import router as sessions_router
-from app.routers.races import router as races_router
-from app.routers.profession import router as professions_router
-from app.routers.levels import router as levels_router
-from app.routers.characters import router as characters_router
-from app.routers.items import router as items_router
-from app.routers.abilities import router as abilities_router
-from app.routers.maps import router as maps_router
-from app.routers.map_objects import router as map_objects_router
-from app.routers.effects import router as effects_router
-from app.routers.event_templates import router as event_templates_router
-from app.routers.inventory import router as inventory_router
-from app.routers.event_instance import router as event_instance_router
-from app.routers.theme import router as theme_router
-
 app.include_router(auth_router)
 app.include_router(players_router)
 app.include_router(sessions_router)
@@ -103,6 +105,7 @@ app.include_router(event_templates_router)
 app.include_router(inventory_router)
 app.include_router(event_instance_router)
 app.include_router(theme_router)
+app.include_router(upload_router)  # *** добавлен роут /upload/image/ ***
 
 
 # --- Web-интерфейс (страница с WebSocket) ---

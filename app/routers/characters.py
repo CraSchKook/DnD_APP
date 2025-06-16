@@ -3,6 +3,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 from typing import List
+import os
+from pathlib import Path
 
 from app.database import get_db
 from app.models.character import Character as CharacterModel
@@ -27,6 +29,9 @@ router = APIRouter(
     prefix="/characters",
     tags=["Characters"]
 )
+
+# Корневая папка static для файлов
+BASE_STATIC = Path("app/static")
 
 @router.get("/me", response_model=List[CharacterRead])
 async def list_my_characters(
@@ -83,6 +88,7 @@ async def create_character(
     Логика:
     1. Проверяем, что race_id, profession_id, level_id существуют.
     2. Сохраняем все поля, включая «финальные» статы, которые прислал фронтенд.
+    Принимает image_url из запроса.
     """
     # --- Шаг 1: проверка существования Race, Class, Level ---
     result_race = await db.execute(select(RaceModel).where(RaceModel.id == new_char.race_id))
@@ -109,7 +115,7 @@ async def create_character(
         profession_id=new_char.profession_id,
         level_id=new_char.level_id,
         is_npc=new_char.is_npc,
-        avatar_url=new_char.avatar_url,
+        image_url=new_char.image_url,
         hp=new_char.hp,
         armor=new_char.armor,
         strength=new_char.strength,
@@ -156,7 +162,7 @@ async def update_character(
 ):
     """
     Обновить данные персонажа и его способности, но только если этот персонаж
-    действительно принадлежит текущему пользователю.
+    действительно принадлежит текущему пользователю. (Может включать image_url, доступно мастеру)
     """
     # Загрузить и проверить права…
     result = await db.execute(
@@ -168,7 +174,8 @@ async def update_character(
     if not character:
         raise HTTPException(status_code=404, detail="Character not found")
 
-    if character.player_id != current_user.id:
+    # если пользователь не владелец И не мастер — запрещаем
+    if character.player_id != current_user.id and current_user.active_as != "master":
         raise HTTPException(status_code=403, detail="Not your character")
 
     # Обновляем поля, переданные в запросе
@@ -207,15 +214,24 @@ async def delete_character(
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Удалить персонажа, но только если текущий пользователь — его владелец.
+    Удалить персонажа (и файл изображения, если есть),
+    но только если текущий пользователь — его владелец.
     """
     result = await db.execute(select(CharacterModel).where(CharacterModel.id == character_id))
     character = result.scalar_one_or_none()
     if not character:
         raise HTTPException(status_code=404, detail="Character not found")
 
-    if character.player_id != current_user.id:
+    # если пользователь не владелец И не мастер — запрещаем
+    if character.player_id != current_user.id and current_user.active_as != "master":
         raise HTTPException(status_code=403, detail="Not your character")
+
+    # Удаляем файл
+    if character.image_url:
+        rel = character.image_url.removeprefix("/static/")
+        path = BASE_STATIC / rel
+        if path.exists():
+            os.remove(path)
 
     await db.delete(character)
     await db.commit()
@@ -243,6 +259,8 @@ async def character_inventory(
     character = result_char.scalar_one_or_none()
     if not character:
         raise HTTPException(status_code=404, detail="Character not found")
+    
+    # если пользователь не владелец И не мастер — запрещаем
     if character.player_id != current_user.id and current_user.active_as != "master":
         raise HTTPException(status_code=403, detail="Not your character")
 

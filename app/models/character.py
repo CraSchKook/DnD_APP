@@ -24,7 +24,7 @@ class Character(Base):
     level_id = Column(Integer, ForeignKey("levels.id"), nullable=False)
     level = relationship("Level", back_populates="characters")
 
-    avatar_url = Column(String, nullable=True)  # новое поле
+    image_url = Column(String, nullable=True, comment="URL картинки персонажа/NPC (путь в static/)")
 
     # Здесь будут уже ФИНАЛЬНЫЕ ХАРАКТЕРИСТИКИ после применения всех бонусов и распределения:
     hp = Column(Integer, default=10)
